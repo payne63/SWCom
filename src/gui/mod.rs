@@ -56,7 +56,6 @@ enum WorkerOutcome {
 pub struct PropertiesGui {
     tabs: Vec<AppTab>,
     active_tab_id: u64,
-    next_tab_id: u64,
     file_path: String,
     loaded_file_path: Option<String>,
     properties: Vec<CustomProperty>,
@@ -100,7 +99,6 @@ impl PropertiesGui {
                 },
             ],
             active_tab_id: MAIN_TAB_ID,
-            next_tab_id: MAIN_TAB_ID + 2,
             file_path: String::new(),
             loaded_file_path: None,
             properties: Vec::new(),
@@ -498,7 +496,6 @@ impl eframe::App for PropertiesGui {
         let mut update_clicked = false;
         let mut file_path_changed = false;
         let mut selected_tab_id = None;
-        let mut add_tab_clicked = false;
         let mut assembly_browse_tab_id = None;
         let mut assembly_process_tab_id = None;
         let mut assembly_export_tab_id = None;
@@ -536,30 +533,12 @@ impl eframe::App for PropertiesGui {
                                     selected_tab_id = Some(tab.id);
                                 }
                             }
-                            add_tab_clicked = ui.button("+").clicked();
                         });
                     });
             });
         });
 
         if let Some(tab_id) = selected_tab_id {
-            self.active_tab_id = tab_id;
-        }
-
-        if add_tab_clicked {
-            let tab_id = self.next_tab_id;
-            self.next_tab_id += 1;
-            self.tabs.push(AppTab {
-                id: tab_id,
-                title: "Liste assemblage".to_owned(),
-                kind: TabKind::AssemblyParts,
-                assembly_file_path: String::new(),
-                assembly_parts: Vec::new(),
-                assembly_thumbnails: HashMap::new(),
-                assembly_loaded: false,
-                assembly_status: None,
-                assembly_status_is_error: false,
-            });
             self.active_tab_id = tab_id;
         }
 
@@ -614,7 +593,9 @@ impl eframe::App for PropertiesGui {
                 .show(context, |ui| {
                     egui::Frame::popup(ui.style()).show(ui, |ui| {
                         ui.label(name);
-                        ui.image((texture.id(), egui::vec2(288.0, 216.0)));
+                        let original_size = texture.size_vec2();
+                        let scale = (288.0 / original_size.x).min(216.0 / original_size.y);
+                        ui.image((texture.id(), original_size * scale));
                     });
                 });
         }
