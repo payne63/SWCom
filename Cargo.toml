@@ -4,7 +4,6 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Dépendance principale pour l'accès aux API Windows, y compris COM
 windows = { version = "0.52.0", features = [
     # Initial Features needed for basic COM and Windows types
     "Win32_Foundation",
