@@ -1,0 +1,21 @@
+[package]
+name = "solidworks_connector"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Dépendance principale pour l'accès aux API Windows, y compris COM
+windows = { version = "0.52.0", features = [
+    # Initial Features needed for basic COM and Windows types
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_System_Ole",
+    "Win32_System_Variant",
+    # Add more features as needed for specific SolidWorks interfaces
+] }
+
+# Autres crates utilitaires si nécessaire (ex: pour la gestion des erreurs)
+# log = "0.4"
+# env_logger = "0.10"
