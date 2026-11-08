@@ -428,6 +428,7 @@ impl eframe::App for PropertiesGui {
         let mut add_tab_clicked = false;
         let mut assembly_browse_tab_id = None;
         let mut assembly_process_tab_id = None;
+        let mut assembly_export_tab_id = None;
         let mut assembly_path_changed_tab_id = None;
         let mut hovered_thumbnail: Option<(String, egui::TextureHandle)> = None;
 
@@ -515,6 +516,9 @@ impl eframe::App for PropertiesGui {
                     if actions.process_clicked {
                         assembly_process_tab_id = Some(tab.id);
                     }
+                    if actions.export_clicked {
+                        assembly_export_tab_id = Some(tab.id);
+                    }
                     if actions.path_changed {
                         assembly_path_changed_tab_id = Some(tab.id);
                     }
@@ -555,6 +559,28 @@ impl eframe::App for PropertiesGui {
         }
         if let Some(tab_id) = assembly_browse_tab_id {
             self.select_assembly_file(tab_id);
+        }
+        if let Some(tab_id) = assembly_export_tab_id {
+            if let Some(path) = FileDialog::new()
+                .add_filter("Classeur Excel", &["xlsx"])
+                .set_file_name("liste_assemblage.xlsx")
+                .save_file()
+            {
+                if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                    match assembly_parts::export_to_xlsx(&tab.assembly_parts, &path) {
+                        Ok(()) => {
+                            tab.assembly_status =
+                                Some(format!("Export Excel créé : {}", path.display()));
+                            tab.assembly_status_is_error = false;
+                        }
+                        Err(error) => {
+                            tab.assembly_status =
+                                Some(format!("Échec de l'export Excel : {error}"));
+                            tab.assembly_status_is_error = true;
+                        }
+                    }
+                }
+            }
         }
         if process_clicked {
             self.process_file(context);
