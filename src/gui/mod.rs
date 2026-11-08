@@ -4,12 +4,13 @@ use std::{
     sync::mpsc::{self, Receiver, TryRecvError},
 };
 
-use egui::{Align, CentralPanel, Color32, Grid, Layout, ScrollArea, TextEdit, TopBottomPanel};
+use egui::{Align, CentralPanel, Layout, ScrollArea, TopBottomPanel};
 use rfd::FileDialog;
 
-use crate::solidworks::{
-    AssemblyItem, AssemblyItemKind, ComApartment, CustomProperty, SolidWorksApp,
-};
+use crate::solidworks::{AssemblyItem, ComApartment, CustomProperty, SolidWorksApp};
+
+mod assembly_parts;
+mod solidworks_properties;
 
 type OperationResult = std::result::Result<WorkerOutcome, String>;
 type TaskResult = (u64, OperationResult);
@@ -494,282 +495,30 @@ impl eframe::App for PropertiesGui {
         let processing_tab_id = self.processing_tab_id;
         CentralPanel::default().show(context, |ui| match active_tab_kind {
             TabKind::SolidWorksProperties => {
-                ui.heading("Propriétés SolidWorks");
-                ui.label("Choisissez une pièce (.sldprt) ou un assemblage (.sldasm).");
-                ui.add_space(8.0);
-
-                ui.horizontal(|ui| {
-                    ui.label("Fichier :");
-                    file_path_changed = ui
-                        .add_enabled(
-                            !self.is_processing,
-                            TextEdit::singleline(&mut self.file_path).desired_width(f32::INFINITY),
-                        )
-                        .changed();
-                });
-
-                ui.horizontal(|ui| {
-                    browse_clicked = ui
-                        .add_enabled(!self.is_processing, egui::Button::new("Parcourir…"))
-                        .clicked();
-                    process_clicked = ui
-                        .add_enabled(
-                            !self.is_processing && !self.file_path.trim().is_empty(),
-                            egui::Button::new("Lire les propriétés"),
-                        )
-                        .clicked();
-                    update_clicked = ui
-                        .add_enabled(
-                            !self.is_processing && self.has_changes(),
-                            egui::Button::new("Mettre à jour dans SolidWorks"),
-                        )
-                        .clicked();
-                });
-
-                if self.is_processing {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Traitement en cours…");
-                    });
-                } else {
-                    let (status_text, status_color) = if let Some(status) = &self.status {
-                        let color = if self.status_is_error {
-                            Color32::LIGHT_RED
-                        } else {
-                            Color32::LIGHT_GREEN
-                        };
-                        (status.as_str(), color)
-                    } else if self.has_changes() {
-                        ("Modifications non enregistrées.", ui.visuals().text_color())
-                    } else {
-                        (" ", ui.visuals().text_color())
-                    };
-                    ui.colored_label(status_color, status_text);
-                }
-
-                if !self.properties.is_empty() {
-                    ui.separator();
-                    ScrollArea::vertical()
-                        .id_salt("custom_properties_scroll")
-                        .show(ui, |ui| {
-                        Grid::new("custom_properties")
-                            .striped(true)
-                            .num_columns(2)
-                            .show(ui, |ui| {
-                                ui.strong("Propriété");
-                                ui.strong("Valeur");
-                                ui.end_row();
-
-                                for (index, property) in self.properties.iter_mut().enumerate() {
-                                    ui.label(&property.name);
-                                    ui.push_id(("custom_property_value", index), |ui| {
-                                        ui.add(
-                                            TextEdit::singleline(&mut property.value)
-                                                .desired_width(f32::INFINITY),
-                                        );
-                                    });
-                                    ui.end_row();
-                                }
-                            });
-                    });
-                } else if self.has_processed && self.status.is_none() {
-                    ui.label("Aucune propriété personnalisée trouvée.");
-                }
+                let actions = solidworks_properties::show(ui, self, is_processing);
+                browse_clicked = actions.browse_clicked;
+                process_clicked = actions.process_clicked;
+                update_clicked = actions.update_clicked;
+                file_path_changed = actions.file_path_changed;
             }
             TabKind::AssemblyParts => {
-                ui.heading("Liste a plat des composants");
-                ui.label(
-                    "Les pièces, sous-assemblages et l'assemblage maître sont regroupés avec leurs quantités.",
-                );
-                ui.add_space(8.0);
-
                 if let Some(tab) = self
                     .tabs
                     .iter_mut()
                     .find(|tab| tab.id == self.active_tab_id)
                 {
-                    ui.horizontal(|ui| {
-                        ui.label("Assemblage :");
-                        let path_response = ui.add_enabled(
-                            !is_processing,
-                            TextEdit::singleline(&mut tab.assembly_file_path)
-                                .desired_width(f32::INFINITY),
-                        );
-                        if path_response.changed() {
-                            assembly_path_changed_tab_id = Some(tab.id);
-                        }
-                    });
-
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(!is_processing, egui::Button::new("Parcourir…"))
-                            .clicked()
-                        {
-                            assembly_browse_tab_id = Some(tab.id);
-                        }
-                        if ui
-                            .add_enabled(
-                                !is_processing && !tab.assembly_file_path.trim().is_empty(),
-                                egui::Button::new("Afficher les composants"),
-                            )
-                            .clicked()
-                        {
-                            assembly_process_tab_id = Some(tab.id);
-                        }
-                    });
-
-                    if is_processing && processing_tab_id == Some(tab.id) {
-                        ui.horizontal(|ui| {
-                            ui.spinner();
-                            ui.label("Lecture de l'assemblage en cours…");
-                        });
-                    } else if is_processing {
-                        ui.label("Une autre opération est en cours…");
-                    } else if let Some(status) = &tab.assembly_status {
-                        let color = if tab.assembly_status_is_error {
-                            Color32::LIGHT_RED
-                        } else {
-                            Color32::LIGHT_GREEN
-                        };
-                        ui.colored_label(color, status);
+                    let (actions, preview) =
+                        assembly_parts::show(ui, tab, is_processing, processing_tab_id);
+                    if actions.browse_clicked {
+                        assembly_browse_tab_id = Some(tab.id);
                     }
-
-                    if !tab.assembly_parts.is_empty() {
-                        ui.separator();
-                        ScrollArea::vertical().show(ui, |ui| {
-                            Grid::new(("assembly_parts", tab.id))
-                                .striped(true)
-                                .num_columns(4)
-                                .show(ui, |ui| {
-                                    ui.strong("Type");
-                                    ui.strong("Nom");
-                                    ui.strong("Chemin");
-                                    ui.strong("Quantité totale");
-                                    ui.end_row();
-
-                                    for item in &tab.assembly_parts {
-                                        let thumbnail = tab
-                                            .assembly_thumbnails
-                                            .get(&item.path.to_lowercase());
-                                        let (label, color) = match item.kind {
-                                            AssemblyItemKind::Part => {
-                                                ("Pièce", Color32::LIGHT_BLUE)
-                                            }
-                                            AssemblyItemKind::SheetMetal => {
-                                                ("Tôlerie", Color32::LIGHT_YELLOW)
-                                            }
-                                            AssemblyItemKind::Assembly => {
-                                                ("Assemblage", Color32::LIGHT_GREEN)
-                                            }
-                                        };
-                                        let type_response = ui.with_layout(
-                                            Layout::left_to_right(Align::Center),
-                                            |ui| {
-                                                let icon_size = ui.text_style_height(
-                                                    &egui::TextStyle::Body,
-                                                );
-                                                let (icon_rect, icon_response) =
-                                                    ui.allocate_exact_size(
-                                                        egui::vec2(icon_size, icon_size),
-                                                        egui::Sense::hover(),
-                                                    );
-                                                let painter = ui.painter_at(icon_rect);
-                                                let stroke = egui::Stroke::new(2.0_f32, color);
-                                                let left = icon_rect.left() + 3.0;
-                                                let right = icon_rect.right() - 3.0;
-                                                let top = icon_rect.top() + 3.0;
-                                                let bottom = icon_rect.bottom() - 3.0;
-
-                                                match item.kind {
-                                                    AssemblyItemKind::Part => {
-                                                        painter.circle_filled(
-                                                            icon_rect.center(),
-                                                            4.0,
-                                                            color,
-                                                        );
-                                                    }
-                                                    AssemblyItemKind::SheetMetal => {
-                                                        painter.line_segment(
-                                                            [
-                                                                egui::pos2(left, top),
-                                                                egui::pos2(left, bottom),
-                                                            ],
-                                                            stroke,
-                                                        );
-                                                        painter.line_segment(
-                                                            [
-                                                                egui::pos2(left, bottom),
-                                                                egui::pos2(right, bottom),
-                                                            ],
-                                                            stroke,
-                                                        );
-                                                    }
-                                                    AssemblyItemKind::Assembly => {
-                                                        painter.line_segment(
-                                                            [
-                                                                egui::pos2(left, top),
-                                                                egui::pos2(right, top),
-                                                            ],
-                                                            stroke,
-                                                        );
-                                                        painter.line_segment(
-                                                            [
-                                                                egui::pos2(right, top),
-                                                                egui::pos2(right, bottom),
-                                                            ],
-                                                            stroke,
-                                                        );
-                                                        painter.line_segment(
-                                                            [
-                                                                egui::pos2(right, bottom),
-                                                                egui::pos2(left, bottom),
-                                                            ],
-                                                            stroke,
-                                                        );
-                                                        painter.line_segment(
-                                                            [
-                                                                egui::pos2(left, bottom),
-                                                                egui::pos2(left, top),
-                                                            ],
-                                                            stroke,
-                                                        );
-                                                    }
-                                                }
-                                                (icon_response, ui.label(label))
-                                            },
-                                        )
-                                        .inner;
-                                        if type_response.0.hovered() || type_response.1.hovered() {
-                                            hovered_thumbnail = thumbnail
-                                                .cloned()
-                                                .map(|texture| (item.name.clone(), texture));
-                                        }
-                                        let name_response = ui.label(&item.name);
-                                        if name_response.hovered() {
-                                            hovered_thumbnail = thumbnail
-                                                .cloned()
-                                                .map(|texture| (item.name.clone(), texture));
-                                        }
-                                        let path_response = ui.label(&item.path);
-                                        if path_response.hovered() {
-                                            hovered_thumbnail = thumbnail
-                                                .cloned()
-                                                .map(|texture| (item.name.clone(), texture));
-                                        }
-                                        let quantity_response =
-                                            ui.label(item.quantity.to_string());
-                                        if quantity_response.hovered() {
-                                            hovered_thumbnail = thumbnail
-                                                .cloned()
-                                                .map(|texture| (item.name.clone(), texture));
-                                        }
-                                        ui.end_row();
-                                    }
-                                });
-                        });
-                    } else if tab.assembly_loaded && tab.assembly_status.is_none() {
-                        ui.label("Aucun composant trouvé dans cet assemblage.");
+                    if actions.process_clicked {
+                        assembly_process_tab_id = Some(tab.id);
                     }
+                    if actions.path_changed {
+                        assembly_path_changed_tab_id = Some(tab.id);
+                    }
+                    hovered_thumbnail = preview;
                 }
             }
         });
