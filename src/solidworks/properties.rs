@@ -9,15 +9,26 @@ use super::dispatch::{
     string_array_from_variant, variant_bool, variant_bstr, variant_i32,
 };
 
-/// Une pièce référencée par un assemblage et son nombre total d'occurrences.
+/// Un composant référencé par un assemblage et son nombre total d'occurrences.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AssemblyPart {
-    /// Nom du fichier de pièce.
+pub struct AssemblyItem {
+    /// Catégorie du composant : pièce ou assemblage.
+    pub kind: AssemblyItemKind,
+    /// Nom du fichier du composant.
     pub name: String,
-    /// Chemin du fichier de pièce référencé par l'assemblage.
+    /// Chemin du fichier référencé par l'assemblage.
     pub path: String,
-    /// Nombre total d'occurrences dans l'assemblage, sous-assemblages inclus.
+    /// Nombre total d'occurrences dans l'assemblage.
     pub quantity: usize,
+}
+
+/// Type de document SolidWorks référencé dans la liste d'un assemblage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AssemblyItemKind {
+    /// Document pièce (`.sldprt`).
+    Part,
+    /// Document assemblage (`.sldasm`).
+    Assembly,
 }
 
 /// Une propriété personnalisée lue dans un document SolidWorks.
@@ -29,10 +40,10 @@ pub struct CustomProperty {
     pub value: String,
 }
 
-/// Ouvre ou réutilise un assemblage et retourne les pièces avec leurs quantités cumulées.
+/// Ouvre ou réutilise un assemblage et retourne ses composants avec leurs quantités cumulées.
 ///
-/// La recherche inclut les composants imbriqués dans les sous-assemblages et ignore les
-/// composants supprimés ainsi que les sous-assemblages eux-mêmes.
+/// La recherche inclut les pièces et les sous-assemblages imbriqués. L'assemblage maître est
+/// également inclus une fois dans le résultat. Les composants supprimés sont ignorés.
 ///
 /// # Arguments
 /// * `sw_app` — interface de l'application SolidWorks.
@@ -40,16 +51,19 @@ pub struct CustomProperty {
 ///
 /// # Errors
 /// Renvoie une erreur si le chemin ne désigne pas un assemblage ou si un appel COM échoue.
-pub(super) fn get_assembly_parts(sw_app: &IDispatch, file_path: &str) -> Result<Vec<AssemblyPart>> {
+pub(super) fn get_assembly_components(
+    sw_app: &IDispatch,
+    file_path: &str,
+) -> Result<Vec<AssemblyItem>> {
     if document_type(file_path)? != 2 {
         return Err(Error::new(
             HRESULT(0x80070057_u32 as i32),
-            "La liste des pièces nécessite un fichier .sldasm".into(),
+            "La liste des composants nécessite un fichier .sldasm".into(),
         ));
     }
 
     let (document, opened_by_this_call) = open_or_reuse_document(sw_app, file_path, 2, 3)?;
-    let parts_result = read_assembly_parts(&document);
+    let parts_result = read_assembly_components(&document, file_path);
     if !opened_by_this_call {
         return parts_result;
     }
@@ -197,14 +211,15 @@ fn close_document(sw_app: &IDispatch, document: &IDispatch, file_path: &str) -> 
     Ok(())
 }
 
-/// Parcourt tous les composants d'un assemblage et regroupe les occurrences de pièces.
+/// Parcourt tous les composants et regroupe les occurrences de pièces et d'assemblages.
 ///
-/// `GetComponents(false)` inclut les composants des sous-assemblages. Les composants supprimés
-/// et les composants qui ne sont pas des pièces sont ignorés.
+/// `GetComponents(false)` inclut les composants des sous-assemblages. L'assemblage maître est
+/// ajouté avec une quantité de un ; les composants supprimés ou sans chemin de fichier sont
+/// ignorés.
 ///
 /// # Errors
 /// Renvoie une erreur si SolidWorks ne peut pas fournir la liste ou les informations des composants.
-fn read_assembly_parts(document: &IDispatch) -> Result<Vec<AssemblyPart>> {
+fn read_assembly_components(document: &IDispatch, master_path: &str) -> Result<Vec<AssemblyItem>> {
     let mut arguments = [variant_bool(false)];
     let mut components_variant = invoke(
         document,
@@ -214,7 +229,22 @@ fn read_assembly_parts(document: &IDispatch) -> Result<Vec<AssemblyPart>> {
         true,
     )?;
     let components = dispatch_array_from_variant(&mut components_variant)?;
-    let mut totals: HashMap<String, (String, String, usize)> = HashMap::new();
+    let mut totals: HashMap<String, AssemblyItem> = HashMap::new();
+
+    let master_name = Path::new(master_path)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or(master_path)
+        .to_owned();
+    totals.insert(
+        master_path.to_lowercase(),
+        AssemblyItem {
+            kind: AssemblyItemKind::Assembly,
+            name: master_name,
+            path: master_path.to_owned(),
+            quantity: 1,
+        },
+    );
 
     for component in components {
         let suppression = invoke(&component, "GetSuppression", DISPATCH_METHOD, &mut [], true)?;
@@ -223,13 +253,16 @@ fn read_assembly_parts(document: &IDispatch) -> Result<Vec<AssemblyPart>> {
         }
 
         let path = match invoke_string(&component, "GetPathName", DISPATCH_METHOD, &mut []) {
-            Ok(path)
-                if Path::new(&path)
-                    .extension()
-                    .and_then(|extension| extension.to_str())
-                    .is_some_and(|extension| extension.eq_ignore_ascii_case("sldprt")) =>
-            {
-                path
+            Ok(path) => path,
+            Err(_) => continue,
+        };
+        let kind = match Path::new(&path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some(extension) if extension.eq_ignore_ascii_case("sldprt") => AssemblyItemKind::Part,
+            Some(extension) if extension.eq_ignore_ascii_case("sldasm") => {
+                AssemblyItemKind::Assembly
             }
             _ => continue,
         };
@@ -239,25 +272,24 @@ fn read_assembly_parts(document: &IDispatch) -> Result<Vec<AssemblyPart>> {
             .and_then(|name| name.to_str())
             .unwrap_or(&path)
             .to_owned();
-        let entry = totals.entry(key).or_insert((name, path, 0));
-        entry.2 += 1;
-    }
-
-    let mut parts: Vec<AssemblyPart> = totals
-        .into_values()
-        .map(|(name, path, quantity)| AssemblyPart {
+        let entry = totals.entry(key).or_insert(AssemblyItem {
+            kind,
             name,
             path,
-            quantity,
-        })
-        .collect();
-    parts.sort_by(|left, right| {
+            quantity: 0,
+        });
+        entry.quantity += 1;
+    }
+
+    let mut items: Vec<AssemblyItem> = totals.into_values().collect();
+    items.sort_by(|left, right| {
         left.name
             .to_lowercase()
             .cmp(&right.name.to_lowercase())
+            .then_with(|| left.kind.cmp(&right.kind))
             .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
     });
-    Ok(parts)
+    Ok(items)
 }
 
 /// Lit les propriétés personnalisées générales d'un document `ModelDoc2`.

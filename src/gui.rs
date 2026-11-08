@@ -4,7 +4,9 @@ use std::thread;
 use egui::{Align, CentralPanel, Color32, Grid, Layout, ScrollArea, TextEdit, TopBottomPanel};
 use rfd::FileDialog;
 
-use crate::solidworks::{AssemblyPart, ComApartment, CustomProperty, SolidWorksApp};
+use crate::solidworks::{
+    AssemblyItem, AssemblyItemKind, ComApartment, CustomProperty, SolidWorksApp,
+};
 
 type OperationResult = std::result::Result<WorkerOutcome, String>;
 type TaskResult = (u64, OperationResult);
@@ -22,7 +24,7 @@ struct AppTab {
     title: String,
     kind: TabKind,
     assembly_file_path: String,
-    assembly_parts: Vec<AssemblyPart>,
+    assembly_parts: Vec<AssemblyItem>,
     assembly_loaded: bool,
     assembly_status: Option<String>,
     assembly_status_is_error: bool,
@@ -34,8 +36,8 @@ enum WorkerOutcome {
     PropertiesLoaded(String, Vec<CustomProperty>),
     /// Propriétés modifiées et sauvegardées.
     PropertiesUpdated,
-    /// Pièces chargées pour le chemin d'assemblage indiqué.
-    AssemblyPartsLoaded(String, Vec<AssemblyPart>),
+    /// Composants chargés pour le chemin d'assemblage indiqué.
+    AssemblyComponentsLoaded(String, Vec<AssemblyItem>),
 }
 
 /// Interface de sélection d'un fichier et d'affichage de ses propriétés SolidWorks.
@@ -184,8 +186,10 @@ impl PropertiesGui {
         tab.assembly_loaded = false;
         tab.assembly_status = None;
         self.start_worker(tab_id, context, move || {
-            let parts = read_assembly_parts_on_worker(&file_path)?;
-            Ok(WorkerOutcome::AssemblyPartsLoaded(file_path, parts))
+            let components = read_assembly_components_on_worker(&file_path)?;
+            Ok(WorkerOutcome::AssemblyComponentsLoaded(
+                file_path, components,
+            ))
         });
     }
 
@@ -289,10 +293,10 @@ impl PropertiesGui {
                         Some("Les propriétés ont été mises à jour dans le fichier.".to_owned());
                     self.status_is_error = false;
                 }
-                Ok(WorkerOutcome::AssemblyPartsLoaded(file_path, parts)) => {
+                Ok(WorkerOutcome::AssemblyComponentsLoaded(file_path, components)) => {
                     if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                         tab.assembly_file_path = file_path;
-                        tab.assembly_parts = parts;
+                        tab.assembly_parts = components;
                         tab.assembly_loaded = true;
                         tab.assembly_status = None;
                         tab.assembly_status_is_error = false;
@@ -329,11 +333,11 @@ fn update_properties_on_worker(
     run_solidworks_operation(|sw_app| sw_app.update_file_properties(file_path, properties))
 }
 
-/// Initialise COM et lit les quantités de pièces sur le thread de travail.
-fn read_assembly_parts_on_worker(
+/// Initialise COM et lit les composants et quantités sur le thread de travail.
+fn read_assembly_components_on_worker(
     file_path: &str,
-) -> std::result::Result<Vec<AssemblyPart>, String> {
-    run_solidworks_operation(|sw_app| sw_app.get_assembly_parts(file_path))
+) -> std::result::Result<Vec<AssemblyItem>, String> {
+    run_solidworks_operation(|sw_app| sw_app.get_assembly_components(file_path))
 }
 
 /// Exécute une opération SolidWorks dans un appartement COM STA temporaire.
@@ -528,8 +532,10 @@ impl eframe::App for PropertiesGui {
                 }
             }
             TabKind::AssemblyParts => {
-                ui.heading("Liste a plat");
-                ui.label("Sélectionnez un assemblage pour regrouper ses pièces et quantités.");
+                ui.heading("Liste aplatie des composants");
+                ui.label(
+                    "Les pièces, sous-assemblages et l'assemblage maître sont regroupés avec leurs quantités.",
+                );
                 ui.add_space(8.0);
 
                 if let Some(tab) = self
@@ -559,7 +565,7 @@ impl eframe::App for PropertiesGui {
                         if ui
                             .add_enabled(
                                 !is_processing && !tab.assembly_file_path.trim().is_empty(),
-                                egui::Button::new("Afficher les pièces"),
+                                egui::Button::new("Afficher les composants"),
                             )
                             .clicked()
                         {
@@ -588,23 +594,36 @@ impl eframe::App for PropertiesGui {
                         ScrollArea::vertical().show(ui, |ui| {
                             Grid::new(("assembly_parts", tab.id))
                                 .striped(true)
-                                .num_columns(3)
+                                .num_columns(4)
                                 .show(ui, |ui| {
-                                    ui.strong("Pièce");
+                                    ui.strong("Type");
+                                    ui.strong("Nom");
                                     ui.strong("Chemin");
                                     ui.strong("Quantité totale");
                                     ui.end_row();
 
-                                    for part in &tab.assembly_parts {
-                                        ui.label(&part.name);
-                                        ui.label(&part.path);
-                                        ui.label(part.quantity.to_string());
+                                    for item in &tab.assembly_parts {
+                                        let (icon, label, color) = match item.kind {
+                                            AssemblyItemKind::Part => {
+                                                ("●", "Pièce", Color32::LIGHT_BLUE)
+                                            }
+                                            AssemblyItemKind::Assembly => {
+                                                ("▣", "Assemblage", Color32::LIGHT_GREEN)
+                                            }
+                                        };
+                                        ui.horizontal(|ui| {
+                                            ui.colored_label(color, icon);
+                                            ui.label(label);
+                                        });
+                                        ui.label(&item.name);
+                                        ui.label(&item.path);
+                                        ui.label(item.quantity.to_string());
                                         ui.end_row();
                                     }
                                 });
                         });
                     } else if tab.assembly_loaded && tab.assembly_status.is_none() {
-                        ui.label("Aucune pièce trouvée dans cet assemblage.");
+                        ui.label("Aucun composant trouvé dans cet assemblage.");
                     }
                 }
             }
