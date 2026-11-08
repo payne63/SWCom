@@ -1,12 +1,13 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs,
-    path::Path,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 use windows::core::{Error, Result, BSTR, HRESULT};
 use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::System::Com::{IDispatch, DISPATCH_METHOD, DISPATCH_PROPERTYGET};
+use windows::Win32::System::Variant::VARIANT;
 
 use super::dispatch::{
     bool_from_variant, byref_bool, byref_bstr, byref_i32, dispatch_array_from_variant,
@@ -95,6 +96,134 @@ pub(super) fn get_assembly_components(
         close_result?;
         Ok(parts)
     })
+}
+
+/// Exporte les mises à plat des pièces de tôlerie vers le dossier `dxf auto` de l'assemblage.
+///
+/// Chaque chemin de pièce fourni est exporté une seule fois. Les noms de fichiers DXF sont
+/// rendus uniques lorsque plusieurs pièces portent le même nom de fichier.
+///
+/// # Errors
+/// Renvoie une erreur si le chemin de l'assemblage est invalide ou si le dossier de sortie ne
+/// peut pas être créé. Les erreurs propres à une pièce sont retournées dans la liste de résultats.
+pub(super) fn export_sheet_metal_dxf(
+    sw_app: &IDispatch,
+    assembly_path: &str,
+    sheet_metal_paths: &[String],
+) -> Result<(PathBuf, usize, Vec<String>)> {
+    if document_type(assembly_path)? != 2 {
+        return Err(Error::new(
+            HRESULT(0x80070057_u32 as i32),
+            "L'export DXF nécessite un fichier .sldasm".into(),
+        ));
+    }
+
+    let output_directory = Path::new(assembly_path)
+        .parent()
+        .ok_or_else(|| {
+            Error::new(
+                HRESULT(0x80070057_u32 as i32),
+                "Impossible de déterminer le répertoire de l'assemblage maître".into(),
+            )
+        })?
+        .join("dxf auto");
+
+    if sheet_metal_paths.is_empty() {
+        return Ok((output_directory, 0, Vec::new()));
+    }
+
+    fs::create_dir_all(&output_directory).map_err(|error| {
+        Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            format!(
+                "Impossible de créer le répertoire '{}': {error}",
+                output_directory.display()
+            )
+            .into(),
+        )
+    })?;
+
+    let mut used_names = HashSet::new();
+    let mut exported_count = 0;
+    let mut failures = Vec::new();
+
+    for part_path in sheet_metal_paths {
+        let stem = Path::new(part_path)
+            .file_stem()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or("piece");
+        let mut suffix = 1;
+        let file_name = loop {
+            let candidate = if suffix == 1 {
+                format!("{stem}.dxf")
+            } else {
+                format!("{stem}_{suffix}.dxf")
+            };
+            if used_names.insert(candidate.to_lowercase()) {
+                break candidate;
+            }
+            suffix += 1;
+        };
+        let output_path = output_directory.join(file_name);
+
+        match export_sheet_metal_part(sw_app, part_path, &output_path) {
+            Ok(()) => exported_count += 1,
+            Err(error) => failures.push(format!("{} : {error}", Path::new(part_path).display())),
+        }
+    }
+
+    Ok((output_directory, exported_count, failures))
+}
+
+/// Ouvre ou réutilise une pièce, exporte sa mise à plat, puis ferme uniquement les documents
+/// qui ont été ouverts par cette opération.
+fn export_sheet_metal_part(sw_app: &IDispatch, part_path: &str, output_path: &Path) -> Result<()> {
+    if document_type(part_path)? != 1 {
+        return Err(Error::new(
+            HRESULT(0x80070057_u32 as i32),
+            "Le composant n'est pas une pièce .sldprt".into(),
+        ));
+    }
+
+    let (document, opened_by_this_call) = open_or_reuse_document(sw_app, part_path, 1, 1)?;
+    let export_result = export_flat_pattern(&document, part_path, output_path);
+    if !opened_by_this_call {
+        return export_result;
+    }
+
+    let close_result = close_document(sw_app, &document, part_path);
+    export_result.and_then(|()| close_result)
+}
+
+/// Demande à SolidWorks de générer un DXF contenant la géométrie plane et les lignes de pliage.
+fn export_flat_pattern(document: &IDispatch, model_path: &str, output_path: &Path) -> Result<()> {
+    let output_path = output_path.to_string_lossy();
+    let mut arguments = [
+        VARIANT::default(), // Views (inutilisé pour l'export de tôlerie)
+        variant_i32(5),     // Géométrie de mise à plat + lignes de pliage
+        variant_bool(false),
+        variant_bool(false),
+        VARIANT::default(), // Alignment (alignement par défaut de SolidWorks)
+        variant_bool(true),
+        variant_i32(1), // swExportToDWG_ExportSheetMetal
+        variant_bstr(model_path),
+        variant_bstr(&output_path),
+    ];
+    let exported = invoke(
+        document,
+        "ExportToDWG2",
+        DISPATCH_METHOD,
+        &mut arguments,
+        true,
+    )?;
+    if !bool_from_variant(&exported)? {
+        return Err(Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            format!("SolidWorks a refusé l'export vers '{}'.", output_path).into(),
+        ));
+    }
+    Ok(())
 }
 
 /// Ouvre ou réutilise un fichier SolidWorks et lit ses propriétés personnalisées générales.

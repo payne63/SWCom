@@ -108,6 +108,23 @@ impl SolidWorksApp {
         super::properties::get_assembly_components(&self.dispatch, file_path)
     }
 
+    /// Exporte les mises à plat DXF des pièces de tôlerie vers `dxf auto` à côté de l'assemblage.
+    ///
+    /// # Arguments
+    /// * `assembly_path` — chemin de l'assemblage maître.
+    /// * `sheet_metal_paths` — chemins des pièces reconnues comme tôlerie.
+    ///
+    /// # Errors
+    /// Renvoie une erreur si le dossier de sortie ne peut pas être créé ou si le chemin de
+    /// l'assemblage est invalide. Les échecs d'export individuels sont retournés séparément.
+    pub fn export_sheet_metal_dxf(
+        &self,
+        assembly_path: &str,
+        sheet_metal_paths: &[String],
+    ) -> Result<(std::path::PathBuf, usize, Vec<String>)> {
+        super::properties::export_sheet_metal_dxf(&self.dispatch, assembly_path, sheet_metal_paths)
+    }
+
     /// Ferme SolidWorks uniquement si [`connect`](Self::connect) l'a démarré.
     ///
     /// Ne fait rien si l'instance était déjà active avant la connexion.

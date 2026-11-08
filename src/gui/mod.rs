@@ -1,6 +1,7 @@
 use std::thread;
 use std::{
     collections::HashMap,
+    path::PathBuf,
     sync::mpsc::{self, Receiver, TryRecvError},
 };
 
@@ -43,6 +44,12 @@ enum WorkerOutcome {
     PropertiesUpdated,
     /// Composants chargés pour le chemin d'assemblage indiqué.
     AssemblyComponentsLoaded(String, Vec<AssemblyItem>),
+    /// Mises à plat DXF exportées et éventuels échecs par pièce.
+    SheetMetalDxfExported {
+        output_directory: String,
+        exported_count: usize,
+        failures: Vec<String>,
+    },
 }
 
 /// Interface de sélection d'un fichier et d'affichage de ses propriétés SolidWorks.
@@ -201,6 +208,37 @@ impl PropertiesGui {
         });
     }
 
+    /// Démarre l'extraction des mises à plat des pièces de tôlerie de l'onglet.
+    fn export_assembly_sheet_metal(&mut self, tab_id: u64, context: &egui::Context) {
+        if self.is_processing {
+            return;
+        }
+        let Some(tab) = self.tabs.iter().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if !tab.assembly_loaded {
+            return;
+        }
+
+        let assembly_path = tab.assembly_file_path.clone();
+        let sheet_metal_paths = tab
+            .assembly_parts
+            .iter()
+            .filter(|item| item.kind == crate::solidworks::AssemblyItemKind::SheetMetal)
+            .map(|item| item.path.clone())
+            .collect::<Vec<_>>();
+
+        self.start_worker(tab_id, context, move || {
+            let (output_directory, exported_count, failures) =
+                export_sheet_metal_dxf_on_worker(&assembly_path, &sheet_metal_paths)?;
+            Ok(WorkerOutcome::SheetMetalDxfExported {
+                output_directory: output_directory.display().to_string(),
+                exported_count,
+                failures,
+            })
+        });
+    }
+
     /// Ouvre un sélecteur de fichier `.sldasm` pour l'onglet indiqué.
     fn select_assembly_file(&mut self, tab_id: u64) {
         let Some(path) = FileDialog::new()
@@ -313,6 +351,31 @@ impl PropertiesGui {
                         tab.assembly_status_is_error = false;
                     }
                 }
+                Ok(WorkerOutcome::SheetMetalDxfExported {
+                    output_directory,
+                    exported_count,
+                    failures,
+                }) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        if failures.is_empty() {
+                            tab.assembly_status = Some(if exported_count == 0 {
+                                "Aucune pièce de tôlerie à exporter.".to_owned()
+                            } else {
+                                format!(
+                                    "{exported_count} fichier(s) DXF exporté(s) dans {output_directory}"
+                                )
+                            });
+                            tab.assembly_status_is_error = false;
+                        } else {
+                            let first_failure = &failures[0];
+                            tab.assembly_status = Some(format!(
+                                "{exported_count} DXF créé(s), {} échec(s). Premier échec : {first_failure}",
+                                failures.len()
+                            ));
+                            tab.assembly_status_is_error = true;
+                        }
+                    }
+                }
                 Ok(_) => self.set_task_error(tab_id, "Résultat inattendu de la tâche.".to_owned()),
                 Err(error) => self.set_task_error(tab_id, error),
             }
@@ -349,6 +412,16 @@ fn read_assembly_components_on_worker(
     file_path: &str,
 ) -> std::result::Result<Vec<AssemblyItem>, String> {
     run_solidworks_operation(|sw_app| sw_app.get_assembly_components(file_path))
+}
+
+/// Initialise COM puis exporte les mises à plat sur le thread de travail.
+fn export_sheet_metal_dxf_on_worker(
+    assembly_path: &str,
+    sheet_metal_paths: &[String],
+) -> std::result::Result<(PathBuf, usize, Vec<String>), String> {
+    run_solidworks_operation(|sw_app| {
+        sw_app.export_sheet_metal_dxf(assembly_path, sheet_metal_paths)
+    })
 }
 
 /// Exécute une opération SolidWorks dans un appartement COM STA temporaire.
@@ -429,6 +502,7 @@ impl eframe::App for PropertiesGui {
         let mut assembly_browse_tab_id = None;
         let mut assembly_process_tab_id = None;
         let mut assembly_export_tab_id = None;
+        let mut assembly_dxf_export_tab_id = None;
         let mut assembly_path_changed_tab_id = None;
         let mut hovered_thumbnail: Option<(String, egui::TextureHandle)> = None;
 
@@ -519,6 +593,9 @@ impl eframe::App for PropertiesGui {
                     if actions.export_clicked {
                         assembly_export_tab_id = Some(tab.id);
                     }
+                    if actions.export_dxf_clicked {
+                        assembly_dxf_export_tab_id = Some(tab.id);
+                    }
                     if actions.path_changed {
                         assembly_path_changed_tab_id = Some(tab.id);
                     }
@@ -581,6 +658,9 @@ impl eframe::App for PropertiesGui {
                     }
                 }
             }
+        }
+        if let Some(tab_id) = assembly_dxf_export_tab_id {
+            self.export_assembly_sheet_metal(tab_id, context);
         }
         if process_clicked {
             self.process_file(context);

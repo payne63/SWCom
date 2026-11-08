@@ -13,6 +13,7 @@ pub(super) struct Actions {
     pub(super) browse_clicked: bool,
     pub(super) process_clicked: bool,
     pub(super) export_clicked: bool,
+    pub(super) export_dxf_clicked: bool,
     pub(super) path_changed: bool,
 }
 
@@ -58,12 +59,18 @@ pub(super) fn show(
                 egui::Button::new("Exporter en .xlsx"),
             )
             .clicked();
+        actions.export_dxf_clicked = ui
+            .add_enabled(
+                !is_processing && tab.assembly_loaded,
+                egui::Button::new("Extraire les mises à plat (.dxf)"),
+            )
+            .clicked();
     });
 
     if is_processing && processing_tab_id == Some(tab.id) {
         ui.horizontal(|ui| {
             ui.spinner();
-            ui.label("Lecture de l'assemblage en cours…");
+            ui.label("Opération SolidWorks en cours…");
         });
     } else if is_processing {
         ui.label("Une autre opération est en cours…");
