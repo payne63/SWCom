@@ -97,7 +97,7 @@ impl SolidWorksApp {
         super::properties::update_file_properties(&self.dispatch, file_path, properties)
     }
 
-    /// Retourne les pièces et assemblages d'un assemblage avec leurs quantités totales.
+    /// Retourne les pièces, en distinguant la tôlerie, et les assemblages avec leurs quantités.
     ///
     /// # Arguments
     /// * `file_path` — chemin d'un fichier `.sldasm`.

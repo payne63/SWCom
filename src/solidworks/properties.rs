@@ -25,8 +25,10 @@ pub struct AssemblyItem {
 /// Type de document SolidWorks référencé dans la liste d'un assemblage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum AssemblyItemKind {
-    /// Document pièce (`.sldprt`).
+    /// Document pièce standard (`.sldprt`).
     Part,
+    /// Document pièce contenant au moins un corps de tôlerie.
+    SheetMetal,
     /// Document assemblage (`.sldasm`).
     Assembly,
 }
@@ -230,6 +232,7 @@ fn read_assembly_components(document: &IDispatch, master_path: &str) -> Result<V
     )?;
     let components = dispatch_array_from_variant(&mut components_variant)?;
     let mut totals: HashMap<String, AssemblyItem> = HashMap::new();
+    let mut sheet_metal_by_path: HashMap<String, bool> = HashMap::new();
 
     let master_name = Path::new(master_path)
         .file_name()
@@ -256,17 +259,26 @@ fn read_assembly_components(document: &IDispatch, master_path: &str) -> Result<V
             Ok(path) => path,
             Err(_) => continue,
         };
+        let key = path.to_lowercase();
         let kind = match Path::new(&path)
             .extension()
             .and_then(|extension| extension.to_str())
         {
-            Some(extension) if extension.eq_ignore_ascii_case("sldprt") => AssemblyItemKind::Part,
+            Some(extension) if extension.eq_ignore_ascii_case("sldprt") => {
+                let is_sheet_metal = *sheet_metal_by_path
+                    .entry(key.clone())
+                    .or_insert_with(|| component_is_sheet_metal(&component));
+                if is_sheet_metal {
+                    AssemblyItemKind::SheetMetal
+                } else {
+                    AssemblyItemKind::Part
+                }
+            }
             Some(extension) if extension.eq_ignore_ascii_case("sldasm") => {
                 AssemblyItemKind::Assembly
             }
             _ => continue,
         };
-        let key = path.to_lowercase();
         let name = Path::new(&path)
             .file_name()
             .and_then(|name| name.to_str())
@@ -290,6 +302,32 @@ fn read_assembly_components(document: &IDispatch, master_path: &str) -> Result<V
             .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
     });
     Ok(items)
+}
+
+/// Indique si un composant contient au moins un corps solide de tôlerie.
+///
+/// Une erreur d'accès aux corps est traitée comme une absence de tôlerie afin de ne pas
+/// interrompre l'extraction de la liste des composants.
+fn component_is_sheet_metal(component: &IDispatch) -> bool {
+    let mut arguments = [variant_i32(0)]; // swSolidBody
+    let Ok(mut bodies_variant) = invoke(
+        component,
+        "GetBodies2",
+        DISPATCH_METHOD,
+        &mut arguments,
+        true,
+    ) else {
+        return false;
+    };
+    let Ok(bodies) = dispatch_array_from_variant(&mut bodies_variant) else {
+        return false;
+    };
+
+    bodies.into_iter().any(|body| {
+        invoke(&body, "IsSheetMetal", DISPATCH_METHOD, &mut [], true)
+            .and_then(|result| bool_from_variant(&result))
+            .unwrap_or(false)
+    })
 }
 
 /// Lit les propriétés personnalisées générales d'un document `ModelDoc2`.

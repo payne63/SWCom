@@ -532,7 +532,7 @@ impl eframe::App for PropertiesGui {
                 }
             }
             TabKind::AssemblyParts => {
-                ui.heading("Liste aplatie des composants");
+                ui.heading("Liste a plat des composants");
                 ui.label(
                     "Les pièces, sous-assemblages et l'assemblage maître sont regroupés avec leurs quantités.",
                 );
@@ -603,18 +603,92 @@ impl eframe::App for PropertiesGui {
                                     ui.end_row();
 
                                     for item in &tab.assembly_parts {
-                                        let (icon, label, color) = match item.kind {
+                                        let (label, color) = match item.kind {
                                             AssemblyItemKind::Part => {
-                                                ("●", "Pièce", Color32::LIGHT_BLUE)
+                                                ("Pièce", Color32::LIGHT_BLUE)
+                                            }
+                                            AssemblyItemKind::SheetMetal => {
+                                                ("Tôlerie", Color32::LIGHT_YELLOW)
                                             }
                                             AssemblyItemKind::Assembly => {
-                                                ("▣", "Assemblage", Color32::LIGHT_GREEN)
+                                                ("Assemblage", Color32::LIGHT_GREEN)
                                             }
                                         };
-                                        ui.horizontal(|ui| {
-                                            ui.colored_label(color, icon);
-                                            ui.label(label);
-                                        });
+                                        ui.with_layout(
+                                            Layout::left_to_right(Align::Center),
+                                            |ui| {
+                                                let icon_size = ui.text_style_height(
+                                                    &egui::TextStyle::Body,
+                                                );
+                                                let (icon_rect, _) = ui.allocate_exact_size(
+                                                    egui::vec2(icon_size, icon_size),
+                                                    egui::Sense::hover(),
+                                                );
+                                                let painter = ui.painter_at(icon_rect);
+                                                let stroke = egui::Stroke::new(2.0_f32, color);
+                                                let left = icon_rect.left() + 3.0;
+                                                let right = icon_rect.right() - 3.0;
+                                                let top = icon_rect.top() + 3.0;
+                                                let bottom = icon_rect.bottom() - 3.0;
+
+                                                match item.kind {
+                                                    AssemblyItemKind::Part => {
+                                                        painter.circle_filled(
+                                                            icon_rect.center(),
+                                                            4.0,
+                                                            color,
+                                                        );
+                                                    }
+                                                    AssemblyItemKind::SheetMetal => {
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(left, top),
+                                                                egui::pos2(left, bottom),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(left, bottom),
+                                                                egui::pos2(right, bottom),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                    }
+                                                    AssemblyItemKind::Assembly => {
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(left, top),
+                                                                egui::pos2(right, top),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(right, top),
+                                                                egui::pos2(right, bottom),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(right, bottom),
+                                                                egui::pos2(left, bottom),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(left, bottom),
+                                                                egui::pos2(left, top),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                    }
+                                                }
+                                                ui.label(label);
+                                            },
+                                        );
                                         ui.label(&item.name);
                                         ui.label(&item.path);
                                         ui.label(item.quantity.to_string());
