@@ -134,6 +134,34 @@ pub(super) fn dispatch_from_variant(variant: &VARIANT) -> Result<IDispatch> {
 }
 
 /// Construit un `VARIANT` propriétaire contenant une chaîne `BSTR`.
+/// Lit un entier signé de 32 bits depuis un `VARIANT`.
+///
+/// # Errors
+/// Renvoie une erreur si le variant n'est pas de type `VT_I4`.
+pub(super) fn i32_from_variant(variant: &VARIANT) -> Result<i32> {
+    unsafe {
+        let raw = &variant.Anonymous.Anonymous;
+        if raw.vt != VT_I4 {
+            return Err(windows::core::Error::from_win32());
+        }
+        Ok(raw.Anonymous.lVal)
+    }
+}
+
+/// Lit un booléen depuis un `VARIANT`.
+///
+/// # Errors
+/// Renvoie une erreur si le variant n'est pas de type `VT_BOOL`.
+pub(super) fn bool_from_variant(variant: &VARIANT) -> Result<bool> {
+    unsafe {
+        let raw = &variant.Anonymous.Anonymous;
+        if raw.vt != VT_BOOL {
+            return Err(windows::core::Error::from_win32());
+        }
+        Ok(raw.Anonymous.boolVal.0 != 0)
+    }
+}
+
 pub(super) fn variant_bstr(value: &str) -> VARIANT {
     let mut variant = VARIANT::default();
     unsafe {

@@ -78,6 +78,22 @@ impl SolidWorksApp {
         super::properties::get_file_properties(&self.dispatch, file_path)
     }
 
+    /// Met à jour les propriétés personnalisées existantes et sauvegarde le document.
+    ///
+    /// # Arguments
+    /// * `file_path` — chemin d'un fichier `.sldprt` ou `.sldasm`.
+    /// * `properties` — propriétés modifiées à écrire.
+    ///
+    /// # Errors
+    /// Renvoie une erreur si une propriété ne peut pas être modifiée ou si la sauvegarde échoue.
+    pub fn update_file_properties(
+        &self,
+        file_path: &str,
+        properties: &[CustomProperty],
+    ) -> Result<()> {
+        super::properties::update_file_properties(&self.dispatch, file_path, properties)
+    }
+
     /// Ferme SolidWorks uniquement si [`connect`](Self::connect) l'a démarré.
     ///
     /// Ne fait rien si l'instance était déjà active avant la connexion.

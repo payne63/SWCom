@@ -6,27 +6,69 @@ use rfd::FileDialog;
 
 use crate::solidworks::{ComApartment, CustomProperty, SolidWorksApp};
 
+type TaskResult = std::result::Result<WorkerOutcome, String>;
+
+const MAIN_TAB_ID: u64 = 0;
+
+#[derive(Clone, Copy)]
+enum TabKind {
+    SolidWorksProperties,
+    Placeholder,
+}
+
+struct AppTab {
+    id: u64,
+    title: String,
+    kind: TabKind,
+}
+
+/// Résultat métier transmis par le thread de travail à l'interface.
+enum WorkerOutcome {
+    /// Propriétés chargées pour le chemin indiqué.
+    PropertiesLoaded(String, Vec<CustomProperty>),
+    /// Propriétés modifiées et sauvegardées.
+    PropertiesUpdated,
+}
+
 /// Interface de sélection d'un fichier et d'affichage de ses propriétés SolidWorks.
 pub struct PropertiesGui {
+    tabs: Vec<AppTab>,
+    active_tab_id: u64,
+    next_tab_id: u64,
     file_path: String,
+    loaded_file_path: Option<String>,
     properties: Vec<CustomProperty>,
+    original_properties: Vec<CustomProperty>,
     status: Option<String>,
+    status_is_error: bool,
     dark_mode: bool,
     is_processing: bool,
     has_processed: bool,
-    result_receiver: Option<Receiver<std::result::Result<Vec<CustomProperty>, String>>>,
+    fonts_scaled: bool,
+    result_receiver: Option<Receiver<TaskResult>>,
 }
 
 impl PropertiesGui {
     /// Crée l'interface graphique avec un état initial vide.
     pub fn new() -> Self {
         Self {
+            tabs: vec![AppTab {
+                id: MAIN_TAB_ID,
+                title: "Solidworks property".to_owned(),
+                kind: TabKind::SolidWorksProperties,
+            }],
+            active_tab_id: MAIN_TAB_ID,
+            next_tab_id: MAIN_TAB_ID + 1,
             file_path: String::new(),
+            loaded_file_path: None,
             properties: Vec::new(),
+            original_properties: Vec::new(),
             status: None,
+            status_is_error: false,
             dark_mode: false,
             is_processing: false,
             has_processed: false,
+            fonts_scaled: false,
             result_receiver: None,
         }
     }
@@ -38,28 +80,83 @@ impl PropertiesGui {
             .pick_file()
         {
             self.file_path = path.display().to_string();
-            self.properties.clear();
-            self.status = None;
-            self.has_processed = false;
+            self.clear_loaded_properties();
         }
     }
 
-    /// Démarre la lecture des propriétés sur un thread de travail et rend la main à l'interface.
+    /// Efface les valeurs affichées et leur copie de référence.
+    fn clear_loaded_properties(&mut self) {
+        self.loaded_file_path = None;
+        self.properties.clear();
+        self.original_properties.clear();
+        self.status = None;
+        self.status_is_error = false;
+        self.has_processed = false;
+    }
+
+    /// Démarre la lecture des propriétés sur un thread de travail.
     fn process_file(&mut self, context: &egui::Context) {
         if self.is_processing {
             return;
         }
         if self.file_path.trim().is_empty() {
             self.status = Some("Sélectionnez d'abord un fichier SolidWorks.".to_owned());
+            self.status_is_error = true;
             return;
         }
 
-        self.properties.clear();
-        self.status = None;
-        self.is_processing = true;
-        self.has_processed = false;
-
+        self.clear_loaded_properties();
         let file_path = self.file_path.clone();
+        self.start_worker(context, move || {
+            let properties = read_properties_on_worker(&file_path)?;
+            Ok(WorkerOutcome::PropertiesLoaded(file_path, properties))
+        });
+    }
+
+    /// Envoie au thread de travail les propriétés dont la valeur a changé.
+    fn update_file(&mut self, context: &egui::Context) {
+        if self.is_processing || !self.has_changes() {
+            return;
+        }
+        let Some(file_path) = self.loaded_file_path.clone() else {
+            self.status = Some("Relisez le fichier avant de modifier ses propriétés.".to_owned());
+            self.status_is_error = true;
+            return;
+        };
+
+        let changes: Vec<CustomProperty> = self
+            .properties
+            .iter()
+            .zip(&self.original_properties)
+            .filter(|(property, original)| property.value != original.value)
+            .map(|(property, _)| property.clone())
+            .collect();
+
+        self.start_worker(context, move || {
+            update_properties_on_worker(&file_path, &changes)?;
+            Ok(WorkerOutcome::PropertiesUpdated)
+        });
+    }
+
+    /// Indique si au moins une valeur diffère de sa valeur chargée.
+    fn has_changes(&self) -> bool {
+        self.loaded_file_path.as_deref() == Some(self.file_path.as_str())
+            && self
+                .properties
+                .iter()
+                .zip(&self.original_properties)
+                .any(|(property, original)| property.value != original.value)
+    }
+
+    /// Lance une opération bloquante sur un thread séparé et conserve son canal de résultat.
+    fn start_worker<F>(&mut self, context: &egui::Context, operation: F)
+    where
+        F: FnOnce() -> TaskResult + Send + 'static,
+    {
+        self.status = None;
+        self.status_is_error = false;
+        self.is_processing = true;
+
         let repaint_context = context.clone();
         let (sender, receiver) = mpsc::channel();
         self.result_receiver = Some(receiver);
@@ -67,8 +164,7 @@ impl PropertiesGui {
         let worker = thread::Builder::new()
             .name("solidworks-properties".to_owned())
             .spawn(move || {
-                let result = read_properties_on_worker(&file_path);
-                let _ = sender.send(result);
+                let _ = sender.send(operation());
                 repaint_context.request_repaint();
             });
 
@@ -76,10 +172,11 @@ impl PropertiesGui {
             self.result_receiver = None;
             self.is_processing = false;
             self.status = Some(format!("Impossible de démarrer la tâche : {error}"));
+            self.status_is_error = true;
         }
     }
 
-    /// Transfère à l'interface le résultat de la tâche lorsqu'il est disponible.
+    /// Applique à l'interface le résultat de la tâche lorsqu'il est disponible.
     fn poll_worker_result(&mut self) {
         let result = self
             .result_receiver
@@ -97,10 +194,22 @@ impl PropertiesGui {
             self.is_processing = false;
             self.has_processed = true;
             match result {
-                Ok(properties) => self.properties = properties,
+                Ok(WorkerOutcome::PropertiesLoaded(file_path, properties)) => {
+                    self.loaded_file_path = Some(file_path);
+                    self.properties = properties.clone();
+                    self.original_properties = properties;
+                    self.status = None;
+                    self.status_is_error = false;
+                }
+                Ok(WorkerOutcome::PropertiesUpdated) => {
+                    self.original_properties = self.properties.clone();
+                    self.status =
+                        Some("Les propriétés ont été mises à jour dans le fichier.".to_owned());
+                    self.status_is_error = false;
+                }
                 Err(error) => {
-                    self.properties.clear();
                     self.status = Some(error);
+                    self.status_is_error = true;
                 }
             }
         }
@@ -108,20 +217,28 @@ impl PropertiesGui {
 }
 
 /// Initialise COM et lit les propriétés sur le thread de travail.
-///
-/// L'objet SolidWorks est créé et détruit sur ce thread afin de respecter son appartement STA.
-///
-/// # Errors
-/// Renvoie un message si l'initialisation COM, la connexion à SolidWorks ou la lecture échoue.
 fn read_properties_on_worker(file_path: &str) -> std::result::Result<Vec<CustomProperty>, String> {
+    run_solidworks_operation(|sw_app| sw_app.get_file_properties(file_path))
+}
+
+/// Initialise COM et sauvegarde les valeurs modifiées sur le thread de travail.
+fn update_properties_on_worker(
+    file_path: &str,
+    properties: &[CustomProperty],
+) -> std::result::Result<(), String> {
+    run_solidworks_operation(|sw_app| sw_app.update_file_properties(file_path, properties))
+}
+
+/// Exécute une opération SolidWorks dans un appartement COM STA temporaire.
+fn run_solidworks_operation<T>(
+    operation: impl FnOnce(&SolidWorksApp) -> windows::core::Result<T>,
+) -> std::result::Result<T, String> {
     let com_apartment = ComApartment::initialize()
         .map_err(|error| format!("Initialisation COM impossible : {error:?}"))?;
     let sw_app = SolidWorksApp::connect()
         .map_err(|error| format!("Connexion à SolidWorks impossible : {error:?}"))?;
 
-    let properties_result = sw_app
-        .get_file_properties(file_path)
-        .map_err(|error| format!("Lecture des propriétés impossible : {error:?}"));
+    let operation_result = operation(&sw_app).map_err(|error| format!("{error:?}"));
     let shutdown_result = sw_app
         .shutdown()
         .map_err(|error| format!("Fermeture de SolidWorks impossible : {error:?}"));
@@ -129,18 +246,27 @@ fn read_properties_on_worker(file_path: &str) -> std::result::Result<Vec<CustomP
     drop(sw_app);
     drop(com_apartment);
 
-    match properties_result {
-        Ok(properties) => {
+    match operation_result {
+        Ok(value) => {
             shutdown_result?;
-            Ok(properties)
+            Ok(value)
         }
         Err(error) => Err(error),
     }
 }
 
 impl eframe::App for PropertiesGui {
-    /// Dessine la fenêtre et traite les actions de sélection et de lecture.
+    /// Dessine la fenêtre et traite les actions de sélection, lecture et sauvegarde.
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
+        if !self.fonts_scaled {
+            let mut style = (*context.style()).clone();
+            for font in style.text_styles.values_mut() {
+                font.size *= 1.1;
+            }
+            context.set_style(style);
+            self.fonts_scaled = true;
+        }
+
         self.poll_worker_result();
         context.set_visuals(if self.dark_mode {
             egui::Visuals::dark()
@@ -150,15 +276,21 @@ impl eframe::App for PropertiesGui {
 
         let mut browse_clicked = false;
         let mut process_clicked = false;
+        let mut update_clicked = false;
+        let mut file_path_changed = false;
+        let mut selected_tab_id = None;
+        let mut closed_tab_id = None;
+        let mut add_tab_clicked = false;
 
-        TopBottomPanel::top("top_bar").show(context, |ui| {
+        TopBottomPanel::top("app_toolbar").show(context, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let button_label = if self.dark_mode {
-                    "☀ Mode clair"
+                let (icon, tooltip) = if self.dark_mode {
+                    ("☀", "Passer en mode clair")
                 } else {
-                    "🌙 Mode sombre"
+                    ("🌙", "Passer en mode sombre")
                 };
-                if ui.button(button_label).clicked() {
+                let theme_button = ui.button(icon).on_hover_text(tooltip);
+                if theme_button.clicked() {
                     self.dark_mode = !self.dark_mode;
                     context.set_visuals(if self.dark_mode {
                         egui::Visuals::dark()
@@ -166,71 +298,146 @@ impl eframe::App for PropertiesGui {
                         egui::Visuals::light()
                     });
                 }
-            });
-        });
-
-        CentralPanel::default().show(context, |ui| {
-            ui.heading("Propriétés SolidWorks");
-            ui.label("Choisissez une pièce (.sldprt) ou un assemblage (.sldasm).");
-            ui.add_space(8.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Fichier :");
-                ui.add_enabled(
-                    !self.is_processing,
-                    TextEdit::singleline(&mut self.file_path).desired_width(f32::INFINITY),
-                );
-            });
-
-            ui.horizontal(|ui| {
-                browse_clicked = ui
-                    .add_enabled(!self.is_processing, egui::Button::new("Parcourir…"))
-                    .clicked();
-                process_clicked = ui
-                    .add_enabled(
-                        !self.is_processing && !self.file_path.trim().is_empty(),
-                        egui::Button::new("Lire les propriétés"),
-                    )
-                    .clicked();
-            });
-
-            if self.is_processing {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label("Lecture des propriétés en cours…");
-                });
-            } else if let Some(status) = &self.status {
-                ui.colored_label(Color32::LIGHT_RED, status);
-            }
-
-            if !self.properties.is_empty() {
                 ui.separator();
-                ScrollArea::vertical().show(ui, |ui| {
-                    Grid::new("custom_properties")
-                        .striped(true)
-                        .num_columns(2)
-                        .show(ui, |ui| {
-                            ui.strong("Propriété");
-                            ui.strong("Valeur");
-                            ui.end_row();
 
-                            for property in &self.properties {
-                                ui.label(&property.name);
-                                ui.label(&property.value);
-                                ui.end_row();
+                ScrollArea::horizontal()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                            for tab in &self.tabs {
+                                ui.horizontal(|ui| {
+                                    if ui
+                                        .selectable_label(self.active_tab_id == tab.id, &tab.title)
+                                        .clicked()
+                                    {
+                                        selected_tab_id = Some(tab.id);
+                                    }
+                                    if tab.id != MAIN_TAB_ID && ui.small_button("×").clicked() {
+                                        closed_tab_id = Some(tab.id);
+                                    }
+                                });
                             }
+                            add_tab_clicked = ui.button("+").clicked();
                         });
+                    });
+            });
+        });
+
+        if let Some(tab_id) = selected_tab_id {
+            self.active_tab_id = tab_id;
+        }
+        if let Some(tab_id) = closed_tab_id {
+            self.tabs.retain(|tab| tab.id != tab_id);
+            if self.active_tab_id == tab_id {
+                self.active_tab_id = MAIN_TAB_ID;
+            }
+        }
+        if add_tab_clicked {
+            let tab_id = self.next_tab_id;
+            self.next_tab_id += 1;
+            self.tabs.push(AppTab {
+                id: tab_id,
+                title: format!("Onglet {tab_id}"),
+                kind: TabKind::Placeholder,
+            });
+            self.active_tab_id = tab_id;
+        }
+
+        let active_tab = self.tabs.iter().find(|tab| tab.id == self.active_tab_id);
+        let active_tab_kind = active_tab.map_or(TabKind::SolidWorksProperties, |tab| tab.kind);
+        let active_tab_title = active_tab.map_or_else(String::new, |tab| tab.title.clone());
+
+        CentralPanel::default().show(context, |ui| match active_tab_kind {
+            TabKind::SolidWorksProperties => {
+                ui.heading("Propriétés SolidWorks");
+                ui.label("Choisissez une pièce (.sldprt) ou un assemblage (.sldasm).");
+                ui.add_space(8.0);
+
+                ui.horizontal(|ui| {
+                    ui.label("Fichier :");
+                    file_path_changed = ui
+                        .add_enabled(
+                            !self.is_processing,
+                            TextEdit::singleline(&mut self.file_path).desired_width(f32::INFINITY),
+                        )
+                        .changed();
                 });
-            } else if self.has_processed && self.status.is_none() {
-                ui.label("Aucune propriété personnalisée trouvée.");
+
+                ui.horizontal(|ui| {
+                    browse_clicked = ui
+                        .add_enabled(!self.is_processing, egui::Button::new("Parcourir…"))
+                        .clicked();
+                    process_clicked = ui
+                        .add_enabled(
+                            !self.is_processing && !self.file_path.trim().is_empty(),
+                            egui::Button::new("Lire les propriétés"),
+                        )
+                        .clicked();
+                    update_clicked = ui
+                        .add_enabled(
+                            !self.is_processing && self.has_changes(),
+                            egui::Button::new("Mettre à jour dans SolidWorks"),
+                        )
+                        .clicked();
+                });
+
+                if self.is_processing {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Traitement en cours…");
+                    });
+                } else if let Some(status) = &self.status {
+                    let color = if self.status_is_error {
+                        Color32::LIGHT_RED
+                    } else {
+                        Color32::LIGHT_GREEN
+                    };
+                    ui.colored_label(color, status);
+                } else if self.has_changes() {
+                    ui.label("Modifications non enregistrées.");
+                }
+
+                if !self.properties.is_empty() {
+                    ui.separator();
+                    ScrollArea::vertical().show(ui, |ui| {
+                        Grid::new("custom_properties")
+                            .striped(true)
+                            .num_columns(2)
+                            .show(ui, |ui| {
+                                ui.strong("Propriété");
+                                ui.strong("Valeur");
+                                ui.end_row();
+
+                                for property in &mut self.properties {
+                                    ui.label(&property.name);
+                                    ui.add(
+                                        TextEdit::singleline(&mut property.value)
+                                            .desired_width(f32::INFINITY),
+                                    );
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                } else if self.has_processed && self.status.is_none() {
+                    ui.label("Aucune propriété personnalisée trouvée.");
+                }
+            }
+            TabKind::Placeholder => {
+                ui.heading(&active_tab_title);
+                ui.label("Cet onglet est disponible pour une autre fonctionnalité.");
             }
         });
 
+        if file_path_changed {
+            self.clear_loaded_properties();
+        }
         if browse_clicked {
             self.select_file();
         }
         if process_clicked {
             self.process_file(context);
+        } else if update_clicked {
+            self.update_file(context);
         }
     }
 }

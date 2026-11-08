@@ -1,12 +1,12 @@
 use std::path::Path;
-use windows::core::{Result, BSTR};
+use windows::core::{Error, Result, BSTR, HRESULT};
 use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::System::Com::{IDispatch, DISPATCH_METHOD, DISPATCH_PROPERTYGET};
 
 use super::dispatch::{
-    byref_bool, byref_bstr, byref_i32, dispatch_from_variant, invoke, invoke_string,
-    optional_dispatch_from_variant, string_array_from_variant, variant_bool, variant_bstr,
-    variant_i32,
+    bool_from_variant, byref_bool, byref_bstr, byref_i32, dispatch_from_variant, i32_from_variant,
+    invoke, invoke_string, optional_dispatch_from_variant, string_array_from_variant, variant_bool,
+    variant_bstr, variant_i32,
 };
 
 /// Une propriété personnalisée lue dans un document SolidWorks.
@@ -33,21 +33,85 @@ pub(super) fn get_file_properties(
     sw_app: &IDispatch,
     file_path: &str,
 ) -> Result<Vec<CustomProperty>> {
+    let document_type = document_type(file_path)?;
+    let (document, opened_by_this_call) =
+        open_or_reuse_document(sw_app, file_path, document_type, 3)?;
+
+    let properties_result = read_custom_properties(&document);
+    if !opened_by_this_call {
+        return properties_result;
+    }
+
+    let close_result = close_document(sw_app, &document, file_path);
+    properties_result.and_then(|properties| {
+        close_result?;
+        Ok(properties)
+    })
+}
+
+/// Met à jour les propriétés indiquées puis sauvegarde le document.
+///
+/// Le document est ouvert en lecture-écriture si nécessaire. Un document qui était déjà ouvert
+/// reste ouvert après l'opération.
+///
+/// # Errors
+/// Renvoie une erreur si une propriété n'existe pas, ne peut pas être modifiée, ou si la
+/// sauvegarde échoue.
+pub(super) fn update_file_properties(
+    sw_app: &IDispatch,
+    file_path: &str,
+    properties: &[CustomProperty],
+) -> Result<()> {
+    if properties.is_empty() {
+        return Ok(());
+    }
+
+    let document_type = document_type(file_path)?;
+    let (document, opened_by_this_call) =
+        open_or_reuse_document(sw_app, file_path, document_type, 1)?;
+
+    let update_result =
+        write_custom_properties(&document, properties).and_then(|()| save_document(&document));
+
+    if !opened_by_this_call {
+        return update_result;
+    }
+
+    let close_result = close_document(sw_app, &document, file_path);
+    update_result.and_then(|()| close_result)
+}
+
+/// Détermine le type SolidWorks à partir de l'extension du fichier.
+///
+/// # Errors
+/// Renvoie `E_INVALIDARG` si le fichier n'est ni une pièce ni un assemblage.
+fn document_type(file_path: &str) -> Result<i32> {
     let extension = Path::new(file_path)
         .extension()
         .and_then(|extension| extension.to_str())
         .unwrap_or_default();
-    let document_type = if extension.eq_ignore_ascii_case("sldprt") {
-        1 // swDocPART
-    } else if extension.eq_ignore_ascii_case("sldasm") {
-        2 // swDocASSEMBLY
-    } else {
-        return Err(windows::core::Error::new(
-            windows::core::HRESULT(0x80070057_u32 as i32),
-            "Le fichier doit être un .sldprt ou un .sldasm".into(),
-        ));
-    };
 
+    if extension.eq_ignore_ascii_case("sldprt") {
+        Ok(1) // swDocPART
+    } else if extension.eq_ignore_ascii_case("sldasm") {
+        Ok(2) // swDocASSEMBLY
+    } else {
+        Err(Error::new(
+            HRESULT(0x80070057_u32 as i32),
+            "Le fichier doit être un .sldprt ou un .sldasm".into(),
+        ))
+    }
+}
+
+/// Retourne un document déjà ouvert ou l'ouvre avec les options demandées.
+///
+/// `open_options` correspond aux options SolidWorks pour `OpenDoc6`.
+fn open_or_reuse_document(
+    sw_app: &IDispatch,
+    file_path: &str,
+    document_type: i32,
+    open_options: i32,
+) -> Result<(IDispatch, bool)> {
     let mut lookup_arguments = [variant_bstr(file_path)];
     let existing_document = invoke(
         sw_app,
@@ -57,51 +121,37 @@ pub(super) fn get_file_properties(
         true,
     )?;
 
-    let (document, opened_by_this_call) = if let Some(document) =
-        optional_dispatch_from_variant(&existing_document)
-    {
-        (document, false)
-    } else {
-        let mut errors = 0_i32;
-        let mut warnings = 0_i32;
-        let mut arguments = vec![
-            byref_i32(&mut warnings),
-            byref_i32(&mut errors),
-            variant_bstr(""),
-            variant_i32(3), // swOpenDocOptions_Silent | swOpenDocOptions_ReadOnly
-            variant_i32(document_type),
-            variant_bstr(file_path),
-        ];
-        let opened_document = invoke(sw_app, "OpenDoc6", DISPATCH_METHOD, &mut arguments, true)?;
-        (dispatch_from_variant(&opened_document)?, true)
-    };
-
-    let properties_result = read_custom_properties(&document);
-    if !opened_by_this_call {
-        return properties_result;
+    if let Some(document) = optional_dispatch_from_variant(&existing_document) {
+        return Ok((document, false));
     }
 
+    let mut errors = 0_i32;
+    let mut warnings = 0_i32;
+    let mut arguments = vec![
+        byref_i32(&mut warnings),
+        byref_i32(&mut errors),
+        variant_bstr(""),
+        variant_i32(open_options),
+        variant_i32(document_type),
+        variant_bstr(file_path),
+    ];
+    let opened_document = invoke(sw_app, "OpenDoc6", DISPATCH_METHOD, &mut arguments, true)?;
+    Ok((dispatch_from_variant(&opened_document)?, true))
+}
+
+/// Ferme un document en utilisant son titre, ou son nom de fichier en repli.
+fn close_document(sw_app: &IDispatch, document: &IDispatch, file_path: &str) -> Result<()> {
     let title =
-        invoke_string(&document, "GetTitle", DISPATCH_METHOD, &mut []).unwrap_or_else(|_| {
+        invoke_string(document, "GetTitle", DISPATCH_METHOD, &mut []).unwrap_or_else(|_| {
             Path::new(file_path)
                 .file_name()
                 .and_then(|name| name.to_str())
                 .unwrap_or(file_path)
                 .to_owned()
         });
-    let mut close_arguments = [variant_bstr(&title)];
-    let close_result = invoke(
-        sw_app,
-        "CloseDoc",
-        DISPATCH_METHOD,
-        &mut close_arguments,
-        false,
-    );
-
-    properties_result.and_then(|properties| {
-        close_result?;
-        Ok(properties)
-    })
+    let mut arguments = [variant_bstr(&title)];
+    invoke(sw_app, "CloseDoc", DISPATCH_METHOD, &mut arguments, false)?;
+    Ok(())
 }
 
 /// Lit les propriétés personnalisées générales d'un document `ModelDoc2`.
@@ -113,26 +163,7 @@ pub(super) fn get_file_properties(
 /// Renvoie une erreur si SolidWorks ne fournit pas l'extension, le gestionnaire de propriétés
 /// ou si la lecture d'une propriété échoue.
 fn read_custom_properties(document: &IDispatch) -> Result<Vec<CustomProperty>> {
-    let mut no_arguments = [];
-    let extension_variant = invoke(
-        document,
-        "Extension",
-        DISPATCH_PROPERTYGET,
-        &mut no_arguments,
-        true,
-    )?;
-    let extension = dispatch_from_variant(&extension_variant)?;
-
-    let mut manager_arguments = [variant_bstr("")];
-    let manager_variant = invoke(
-        &extension,
-        "CustomPropertyManager",
-        DISPATCH_PROPERTYGET,
-        &mut manager_arguments,
-        true,
-    )?;
-    let manager = dispatch_from_variant(&manager_variant)?;
-
+    let manager = custom_property_manager(document)?;
     let mut no_arguments = [];
     let mut names_variant = invoke(
         &manager,
@@ -169,4 +200,70 @@ fn read_custom_properties(document: &IDispatch) -> Result<Vec<CustomProperty>> {
             Ok(CustomProperty { name, value })
         })
         .collect()
+}
+
+/// Remplace les valeurs des propriétés et vérifie le code retour de `Set2`.
+fn write_custom_properties(document: &IDispatch, properties: &[CustomProperty]) -> Result<()> {
+    let manager = custom_property_manager(document)?;
+
+    for property in properties {
+        let mut arguments = [variant_bstr(&property.value), variant_bstr(&property.name)];
+        let result = invoke(&manager, "Set2", DISPATCH_METHOD, &mut arguments, true)?;
+        let result_code = i32_from_variant(&result)?;
+        if result_code != 0 {
+            return Err(Error::new(
+                HRESULT(0x80004005_u32 as i32),
+                format!(
+                    "SolidWorks n'a pas pu modifier la propriété '{}' (code {result_code}).",
+                    property.name
+                )
+                .into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+/// Sauvegarde un document SolidWorks en mode silencieux.
+fn save_document(document: &IDispatch) -> Result<()> {
+    let mut errors = 0_i32;
+    let mut warnings = 0_i32;
+    let mut arguments = [
+        byref_i32(&mut warnings),
+        byref_i32(&mut errors),
+        variant_i32(1), // swSaveAsOptions_Silent
+    ];
+    let result = invoke(document, "Save3", DISPATCH_METHOD, &mut arguments, true)?;
+
+    if !bool_from_variant(&result)? {
+        return Err(Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            format!("Échec de sauvegarde (erreurs {errors}, avertissements {warnings}).").into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Récupère le gestionnaire des propriétés générales du document.
+fn custom_property_manager(document: &IDispatch) -> Result<IDispatch> {
+    let mut no_arguments = [];
+    let extension_variant = invoke(
+        document,
+        "Extension",
+        DISPATCH_PROPERTYGET,
+        &mut no_arguments,
+        true,
+    )?;
+    let extension = dispatch_from_variant(&extension_variant)?;
+
+    let mut arguments = [variant_bstr("")];
+    let manager_variant = invoke(
+        &extension,
+        "CustomPropertyManager",
+        DISPATCH_PROPERTYGET,
+        &mut arguments,
+        true,
+    )?;
+    dispatch_from_variant(&manager_variant)
 }
