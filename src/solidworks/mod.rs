@@ -3,4 +3,4 @@ mod dispatch;
 mod properties;
 
 pub use application::{ComApartment, SolidWorksApp};
-pub use properties::CustomProperty;
+pub use properties::{AssemblyPart, CustomProperty};

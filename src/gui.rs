@@ -4,22 +4,28 @@ use std::thread;
 use egui::{Align, CentralPanel, Color32, Grid, Layout, ScrollArea, TextEdit, TopBottomPanel};
 use rfd::FileDialog;
 
-use crate::solidworks::{ComApartment, CustomProperty, SolidWorksApp};
+use crate::solidworks::{AssemblyPart, ComApartment, CustomProperty, SolidWorksApp};
 
-type TaskResult = std::result::Result<WorkerOutcome, String>;
+type OperationResult = std::result::Result<WorkerOutcome, String>;
+type TaskResult = (u64, OperationResult);
 
 const MAIN_TAB_ID: u64 = 0;
 
 #[derive(Clone, Copy)]
 enum TabKind {
     SolidWorksProperties,
-    Placeholder,
+    AssemblyParts,
 }
 
 struct AppTab {
     id: u64,
     title: String,
     kind: TabKind,
+    assembly_file_path: String,
+    assembly_parts: Vec<AssemblyPart>,
+    assembly_loaded: bool,
+    assembly_status: Option<String>,
+    assembly_status_is_error: bool,
 }
 
 /// Résultat métier transmis par le thread de travail à l'interface.
@@ -28,6 +34,8 @@ enum WorkerOutcome {
     PropertiesLoaded(String, Vec<CustomProperty>),
     /// Propriétés modifiées et sauvegardées.
     PropertiesUpdated,
+    /// Pièces chargées pour le chemin d'assemblage indiqué.
+    AssemblyPartsLoaded(String, Vec<AssemblyPart>),
 }
 
 /// Interface de sélection d'un fichier et d'affichage de ses propriétés SolidWorks.
@@ -43,6 +51,7 @@ pub struct PropertiesGui {
     status_is_error: bool,
     dark_mode: bool,
     is_processing: bool,
+    processing_tab_id: Option<u64>,
     has_processed: bool,
     fonts_scaled: bool,
     result_receiver: Option<Receiver<TaskResult>>,
@@ -52,21 +61,39 @@ impl PropertiesGui {
     /// Crée l'interface graphique avec un état initial vide.
     pub fn new() -> Self {
         Self {
-            tabs: vec![AppTab {
-                id: MAIN_TAB_ID,
-                title: "Solidworks property".to_owned(),
-                kind: TabKind::SolidWorksProperties,
-            }],
+            tabs: vec![
+                AppTab {
+                    id: MAIN_TAB_ID,
+                    title: "Solidworks property".to_owned(),
+                    kind: TabKind::SolidWorksProperties,
+                    assembly_file_path: String::new(),
+                    assembly_parts: Vec::new(),
+                    assembly_loaded: false,
+                    assembly_status: None,
+                    assembly_status_is_error: false,
+                },
+                AppTab {
+                    id: MAIN_TAB_ID + 1,
+                    title: "Liste assemblage".to_owned(),
+                    kind: TabKind::AssemblyParts,
+                    assembly_file_path: String::new(),
+                    assembly_parts: Vec::new(),
+                    assembly_loaded: false,
+                    assembly_status: None,
+                    assembly_status_is_error: false,
+                },
+            ],
             active_tab_id: MAIN_TAB_ID,
-            next_tab_id: MAIN_TAB_ID + 1,
+            next_tab_id: MAIN_TAB_ID + 2,
             file_path: String::new(),
             loaded_file_path: None,
             properties: Vec::new(),
             original_properties: Vec::new(),
             status: None,
             status_is_error: false,
-            dark_mode: false,
+            dark_mode: true,
             is_processing: false,
+            processing_tab_id: None,
             has_processed: false,
             fonts_scaled: false,
             result_receiver: None,
@@ -107,7 +134,7 @@ impl PropertiesGui {
 
         self.clear_loaded_properties();
         let file_path = self.file_path.clone();
-        self.start_worker(context, move || {
+        self.start_worker(MAIN_TAB_ID, context, move || {
             let properties = read_properties_on_worker(&file_path)?;
             Ok(WorkerOutcome::PropertiesLoaded(file_path, properties))
         });
@@ -132,10 +159,52 @@ impl PropertiesGui {
             .map(|(property, _)| property.clone())
             .collect();
 
-        self.start_worker(context, move || {
+        self.start_worker(MAIN_TAB_ID, context, move || {
             update_properties_on_worker(&file_path, &changes)?;
             Ok(WorkerOutcome::PropertiesUpdated)
         });
+    }
+
+    /// Lance la lecture aplatie des pièces d'un onglet d'assemblage.
+    fn process_assembly_tab(&mut self, tab_id: u64, context: &egui::Context) {
+        if self.is_processing {
+            return;
+        }
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if tab.assembly_file_path.trim().is_empty() {
+            tab.assembly_status = Some("Sélectionnez un fichier .sldasm.".to_owned());
+            tab.assembly_status_is_error = true;
+            return;
+        }
+
+        let file_path = tab.assembly_file_path.clone();
+        tab.assembly_parts.clear();
+        tab.assembly_loaded = false;
+        tab.assembly_status = None;
+        self.start_worker(tab_id, context, move || {
+            let parts = read_assembly_parts_on_worker(&file_path)?;
+            Ok(WorkerOutcome::AssemblyPartsLoaded(file_path, parts))
+        });
+    }
+
+    /// Ouvre un sélecteur de fichier `.sldasm` pour l'onglet indiqué.
+    fn select_assembly_file(&mut self, tab_id: u64) {
+        let Some(path) = FileDialog::new()
+            .add_filter("Assemblages SolidWorks", &["sldasm"])
+            .pick_file()
+        else {
+            return;
+        };
+
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.assembly_file_path = path.display().to_string();
+            tab.assembly_parts.clear();
+            tab.assembly_loaded = false;
+            tab.assembly_status = None;
+            tab.assembly_status_is_error = false;
+        }
     }
 
     /// Indique si au moins une valeur diffère de sa valeur chargée.
@@ -149,13 +218,19 @@ impl PropertiesGui {
     }
 
     /// Lance une opération bloquante sur un thread séparé et conserve son canal de résultat.
-    fn start_worker<F>(&mut self, context: &egui::Context, operation: F)
+    fn start_worker<F>(&mut self, tab_id: u64, context: &egui::Context, operation: F)
     where
-        F: FnOnce() -> TaskResult + Send + 'static,
+        F: FnOnce() -> OperationResult + Send + 'static,
     {
-        self.status = None;
-        self.status_is_error = false;
+        if tab_id == MAIN_TAB_ID {
+            self.status = None;
+            self.status_is_error = false;
+        } else if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.assembly_status = None;
+            tab.assembly_status_is_error = false;
+        }
         self.is_processing = true;
+        self.processing_tab_id = Some(tab_id);
 
         let repaint_context = context.clone();
         let (sender, receiver) = mpsc::channel();
@@ -164,15 +239,15 @@ impl PropertiesGui {
         let worker = thread::Builder::new()
             .name("solidworks-properties".to_owned())
             .spawn(move || {
-                let _ = sender.send(operation());
+                let _ = sender.send((tab_id, operation()));
                 repaint_context.request_repaint();
             });
 
         if let Err(error) = worker {
             self.result_receiver = None;
             self.is_processing = false;
-            self.status = Some(format!("Impossible de démarrer la tâche : {error}"));
-            self.status_is_error = true;
+            self.processing_tab_id = None;
+            self.set_task_error(tab_id, format!("Impossible de démarrer la tâche : {error}"));
         }
     }
 
@@ -184,34 +259,59 @@ impl PropertiesGui {
             .and_then(|receiver| match receiver.try_recv() {
                 Ok(result) => Some(result),
                 Err(TryRecvError::Empty) => None,
-                Err(TryRecvError::Disconnected) => {
-                    Some(Err("La tâche de lecture s'est interrompue.".to_owned()))
-                }
+                Err(TryRecvError::Disconnected) => Some((
+                    self.processing_tab_id.unwrap_or(MAIN_TAB_ID),
+                    Err("La tâche de lecture s'est interrompue.".to_owned()),
+                )),
             });
 
-        if let Some(result) = result {
+        if let Some((tab_id, result)) = result {
             self.result_receiver = None;
             self.is_processing = false;
-            self.has_processed = true;
+            self.processing_tab_id = None;
+            if tab_id == MAIN_TAB_ID {
+                self.has_processed = true;
+            }
+
             match result {
-                Ok(WorkerOutcome::PropertiesLoaded(file_path, properties)) => {
+                Ok(WorkerOutcome::PropertiesLoaded(file_path, properties))
+                    if tab_id == MAIN_TAB_ID =>
+                {
                     self.loaded_file_path = Some(file_path);
                     self.properties = properties.clone();
                     self.original_properties = properties;
                     self.status = None;
                     self.status_is_error = false;
                 }
-                Ok(WorkerOutcome::PropertiesUpdated) => {
+                Ok(WorkerOutcome::PropertiesUpdated) if tab_id == MAIN_TAB_ID => {
                     self.original_properties = self.properties.clone();
                     self.status =
                         Some("Les propriétés ont été mises à jour dans le fichier.".to_owned());
                     self.status_is_error = false;
                 }
-                Err(error) => {
-                    self.status = Some(error);
-                    self.status_is_error = true;
+                Ok(WorkerOutcome::AssemblyPartsLoaded(file_path, parts)) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        tab.assembly_file_path = file_path;
+                        tab.assembly_parts = parts;
+                        tab.assembly_loaded = true;
+                        tab.assembly_status = None;
+                        tab.assembly_status_is_error = false;
+                    }
                 }
+                Ok(_) => self.set_task_error(tab_id, "Résultat inattendu de la tâche.".to_owned()),
+                Err(error) => self.set_task_error(tab_id, error),
             }
+        }
+    }
+
+    /// Affiche une erreur dans la page qui a lancé la tâche.
+    fn set_task_error(&mut self, tab_id: u64, error: String) {
+        if tab_id == MAIN_TAB_ID {
+            self.status = Some(error);
+            self.status_is_error = true;
+        } else if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.assembly_status = Some(error);
+            tab.assembly_status_is_error = true;
         }
     }
 }
@@ -227,6 +327,13 @@ fn update_properties_on_worker(
     properties: &[CustomProperty],
 ) -> std::result::Result<(), String> {
     run_solidworks_operation(|sw_app| sw_app.update_file_properties(file_path, properties))
+}
+
+/// Initialise COM et lit les quantités de pièces sur le thread de travail.
+fn read_assembly_parts_on_worker(
+    file_path: &str,
+) -> std::result::Result<Vec<AssemblyPart>, String> {
+    run_solidworks_operation(|sw_app| sw_app.get_assembly_parts(file_path))
 }
 
 /// Exécute une opération SolidWorks dans un appartement COM STA temporaire.
@@ -261,7 +368,7 @@ impl eframe::App for PropertiesGui {
         if !self.fonts_scaled {
             let mut style = (*context.style()).clone();
             for font in style.text_styles.values_mut() {
-                font.size *= 1.1;
+                font.size *= 1.2;
             }
             context.set_style(style);
             self.fonts_scaled = true;
@@ -279,8 +386,10 @@ impl eframe::App for PropertiesGui {
         let mut update_clicked = false;
         let mut file_path_changed = false;
         let mut selected_tab_id = None;
-        let mut closed_tab_id = None;
         let mut add_tab_clicked = false;
+        let mut assembly_browse_tab_id = None;
+        let mut assembly_process_tab_id = None;
+        let mut assembly_path_changed_tab_id = None;
 
         TopBottomPanel::top("app_toolbar").show(context, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -305,17 +414,12 @@ impl eframe::App for PropertiesGui {
                     .show(ui, |ui| {
                         ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
                             for tab in &self.tabs {
-                                ui.horizontal(|ui| {
-                                    if ui
-                                        .selectable_label(self.active_tab_id == tab.id, &tab.title)
-                                        .clicked()
-                                    {
-                                        selected_tab_id = Some(tab.id);
-                                    }
-                                    if tab.id != MAIN_TAB_ID && ui.small_button("×").clicked() {
-                                        closed_tab_id = Some(tab.id);
-                                    }
-                                });
+                                if ui
+                                    .selectable_label(self.active_tab_id == tab.id, &tab.title)
+                                    .clicked()
+                                {
+                                    selected_tab_id = Some(tab.id);
+                                }
                             }
                             add_tab_clicked = ui.button("+").clicked();
                         });
@@ -326,27 +430,28 @@ impl eframe::App for PropertiesGui {
         if let Some(tab_id) = selected_tab_id {
             self.active_tab_id = tab_id;
         }
-        if let Some(tab_id) = closed_tab_id {
-            self.tabs.retain(|tab| tab.id != tab_id);
-            if self.active_tab_id == tab_id {
-                self.active_tab_id = MAIN_TAB_ID;
-            }
-        }
+
         if add_tab_clicked {
             let tab_id = self.next_tab_id;
             self.next_tab_id += 1;
             self.tabs.push(AppTab {
                 id: tab_id,
-                title: format!("Onglet {tab_id}"),
-                kind: TabKind::Placeholder,
+                title: "Liste assemblage".to_owned(),
+                kind: TabKind::AssemblyParts,
+                assembly_file_path: String::new(),
+                assembly_parts: Vec::new(),
+                assembly_loaded: false,
+                assembly_status: None,
+                assembly_status_is_error: false,
             });
             self.active_tab_id = tab_id;
         }
 
         let active_tab = self.tabs.iter().find(|tab| tab.id == self.active_tab_id);
         let active_tab_kind = active_tab.map_or(TabKind::SolidWorksProperties, |tab| tab.kind);
-        let active_tab_title = active_tab.map_or_else(String::new, |tab| tab.title.clone());
 
+        let is_processing = self.is_processing;
+        let processing_tab_id = self.processing_tab_id;
         CentralPanel::default().show(context, |ui| match active_tab_kind {
             TabKind::SolidWorksProperties => {
                 ui.heading("Propriétés SolidWorks");
@@ -422,22 +527,112 @@ impl eframe::App for PropertiesGui {
                     ui.label("Aucune propriété personnalisée trouvée.");
                 }
             }
-            TabKind::Placeholder => {
-                ui.heading(&active_tab_title);
-                ui.label("Cet onglet est disponible pour une autre fonctionnalité.");
+            TabKind::AssemblyParts => {
+                ui.heading("Liste a plat");
+                ui.label("Sélectionnez un assemblage pour regrouper ses pièces et quantités.");
+                ui.add_space(8.0);
+
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == self.active_tab_id)
+                {
+                    ui.horizontal(|ui| {
+                        ui.label("Assemblage :");
+                        let path_response = ui.add_enabled(
+                            !is_processing,
+                            TextEdit::singleline(&mut tab.assembly_file_path)
+                                .desired_width(f32::INFINITY),
+                        );
+                        if path_response.changed() {
+                            assembly_path_changed_tab_id = Some(tab.id);
+                        }
+                    });
+
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(!is_processing, egui::Button::new("Parcourir…"))
+                            .clicked()
+                        {
+                            assembly_browse_tab_id = Some(tab.id);
+                        }
+                        if ui
+                            .add_enabled(
+                                !is_processing && !tab.assembly_file_path.trim().is_empty(),
+                                egui::Button::new("Afficher les pièces"),
+                            )
+                            .clicked()
+                        {
+                            assembly_process_tab_id = Some(tab.id);
+                        }
+                    });
+
+                    if is_processing && processing_tab_id == Some(tab.id) {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label("Lecture de l'assemblage en cours…");
+                        });
+                    } else if is_processing {
+                        ui.label("Une autre opération est en cours…");
+                    } else if let Some(status) = &tab.assembly_status {
+                        let color = if tab.assembly_status_is_error {
+                            Color32::LIGHT_RED
+                        } else {
+                            Color32::LIGHT_GREEN
+                        };
+                        ui.colored_label(color, status);
+                    }
+
+                    if !tab.assembly_parts.is_empty() {
+                        ui.separator();
+                        ScrollArea::vertical().show(ui, |ui| {
+                            Grid::new(("assembly_parts", tab.id))
+                                .striped(true)
+                                .num_columns(3)
+                                .show(ui, |ui| {
+                                    ui.strong("Pièce");
+                                    ui.strong("Chemin");
+                                    ui.strong("Quantité totale");
+                                    ui.end_row();
+
+                                    for part in &tab.assembly_parts {
+                                        ui.label(&part.name);
+                                        ui.label(&part.path);
+                                        ui.label(part.quantity.to_string());
+                                        ui.end_row();
+                                    }
+                                });
+                        });
+                    } else if tab.assembly_loaded && tab.assembly_status.is_none() {
+                        ui.label("Aucune pièce trouvée dans cet assemblage.");
+                    }
+                }
             }
         });
 
         if file_path_changed {
             self.clear_loaded_properties();
         }
+        if let Some(tab_id) = assembly_path_changed_tab_id {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.assembly_parts.clear();
+                tab.assembly_loaded = false;
+                tab.assembly_status = None;
+                tab.assembly_status_is_error = false;
+            }
+        }
         if browse_clicked {
             self.select_file();
+        }
+        if let Some(tab_id) = assembly_browse_tab_id {
+            self.select_assembly_file(tab_id);
         }
         if process_clicked {
             self.process_file(context);
         } else if update_clicked {
             self.update_file(context);
+        } else if let Some(tab_id) = assembly_process_tab_id {
+            self.process_assembly_tab(tab_id, context);
         }
     }
 }

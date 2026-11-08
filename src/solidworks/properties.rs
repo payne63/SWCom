@@ -1,13 +1,24 @@
-use std::path::Path;
+use std::{collections::HashMap, path::Path};
 use windows::core::{Error, Result, BSTR, HRESULT};
 use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::System::Com::{IDispatch, DISPATCH_METHOD, DISPATCH_PROPERTYGET};
 
 use super::dispatch::{
-    bool_from_variant, byref_bool, byref_bstr, byref_i32, dispatch_from_variant, i32_from_variant,
-    invoke, invoke_string, optional_dispatch_from_variant, string_array_from_variant, variant_bool,
-    variant_bstr, variant_i32,
+    bool_from_variant, byref_bool, byref_bstr, byref_i32, dispatch_array_from_variant,
+    dispatch_from_variant, i32_from_variant, invoke, invoke_string, optional_dispatch_from_variant,
+    string_array_from_variant, variant_bool, variant_bstr, variant_i32,
 };
+
+/// Une pièce référencée par un assemblage et son nombre total d'occurrences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssemblyPart {
+    /// Nom du fichier de pièce.
+    pub name: String,
+    /// Chemin du fichier de pièce référencé par l'assemblage.
+    pub path: String,
+    /// Nombre total d'occurrences dans l'assemblage, sous-assemblages inclus.
+    pub quantity: usize,
+}
 
 /// Une propriété personnalisée lue dans un document SolidWorks.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -16,6 +27,38 @@ pub struct CustomProperty {
     pub name: String,
     /// Valeur résolue de la propriété, ou sa valeur brute si aucune résolution n'est disponible.
     pub value: String,
+}
+
+/// Ouvre ou réutilise un assemblage et retourne les pièces avec leurs quantités cumulées.
+///
+/// La recherche inclut les composants imbriqués dans les sous-assemblages et ignore les
+/// composants supprimés ainsi que les sous-assemblages eux-mêmes.
+///
+/// # Arguments
+/// * `sw_app` — interface de l'application SolidWorks.
+/// * `file_path` — chemin d'un fichier `.sldasm`.
+///
+/// # Errors
+/// Renvoie une erreur si le chemin ne désigne pas un assemblage ou si un appel COM échoue.
+pub(super) fn get_assembly_parts(sw_app: &IDispatch, file_path: &str) -> Result<Vec<AssemblyPart>> {
+    if document_type(file_path)? != 2 {
+        return Err(Error::new(
+            HRESULT(0x80070057_u32 as i32),
+            "La liste des pièces nécessite un fichier .sldasm".into(),
+        ));
+    }
+
+    let (document, opened_by_this_call) = open_or_reuse_document(sw_app, file_path, 2, 3)?;
+    let parts_result = read_assembly_parts(&document);
+    if !opened_by_this_call {
+        return parts_result;
+    }
+
+    let close_result = close_document(sw_app, &document, file_path);
+    parts_result.and_then(|parts| {
+        close_result?;
+        Ok(parts)
+    })
 }
 
 /// Ouvre ou réutilise un fichier SolidWorks et lit ses propriétés personnalisées générales.
@@ -152,6 +195,69 @@ fn close_document(sw_app: &IDispatch, document: &IDispatch, file_path: &str) -> 
     let mut arguments = [variant_bstr(&title)];
     invoke(sw_app, "CloseDoc", DISPATCH_METHOD, &mut arguments, false)?;
     Ok(())
+}
+
+/// Parcourt tous les composants d'un assemblage et regroupe les occurrences de pièces.
+///
+/// `GetComponents(false)` inclut les composants des sous-assemblages. Les composants supprimés
+/// et les composants qui ne sont pas des pièces sont ignorés.
+///
+/// # Errors
+/// Renvoie une erreur si SolidWorks ne peut pas fournir la liste ou les informations des composants.
+fn read_assembly_parts(document: &IDispatch) -> Result<Vec<AssemblyPart>> {
+    let mut arguments = [variant_bool(false)];
+    let mut components_variant = invoke(
+        document,
+        "GetComponents",
+        DISPATCH_METHOD,
+        &mut arguments,
+        true,
+    )?;
+    let components = dispatch_array_from_variant(&mut components_variant)?;
+    let mut totals: HashMap<String, (String, String, usize)> = HashMap::new();
+
+    for component in components {
+        let suppression = invoke(&component, "GetSuppression", DISPATCH_METHOD, &mut [], true)?;
+        if i32_from_variant(&suppression)? == 0 {
+            continue;
+        }
+
+        let path = match invoke_string(&component, "GetPathName", DISPATCH_METHOD, &mut []) {
+            Ok(path)
+                if Path::new(&path)
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .is_some_and(|extension| extension.eq_ignore_ascii_case("sldprt")) =>
+            {
+                path
+            }
+            _ => continue,
+        };
+        let key = path.to_lowercase();
+        let name = Path::new(&path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(&path)
+            .to_owned();
+        let entry = totals.entry(key).or_insert((name, path, 0));
+        entry.2 += 1;
+    }
+
+    let mut parts: Vec<AssemblyPart> = totals
+        .into_values()
+        .map(|(name, path, quantity)| AssemblyPart {
+            name,
+            path,
+            quantity,
+        })
+        .collect();
+    parts.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+    });
+    Ok(parts)
 }
 
 /// Lit les propriétés personnalisées générales d'un document `ModelDoc2`.

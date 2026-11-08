@@ -5,7 +5,10 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Ole::GetActiveObject;
 
-use super::{dispatch, properties::CustomProperty};
+use super::{
+    dispatch,
+    properties::{AssemblyPart, CustomProperty},
+};
 
 /// Représente l'initialisation COM sur le thread courant.
 ///
@@ -92,6 +95,17 @@ impl SolidWorksApp {
         properties: &[CustomProperty],
     ) -> Result<()> {
         super::properties::update_file_properties(&self.dispatch, file_path, properties)
+    }
+
+    /// Retourne la liste aplatie des pièces d'un assemblage et leur quantité totale.
+    ///
+    /// # Arguments
+    /// * `file_path` — chemin d'un fichier `.sldasm`.
+    ///
+    /// # Errors
+    /// Renvoie une erreur si le document n'est pas un assemblage ou si un appel SolidWorks échoue.
+    pub fn get_assembly_parts(&self, file_path: &str) -> Result<Vec<AssemblyPart>> {
+        super::properties::get_assembly_parts(&self.dispatch, file_path)
     }
 
     /// Ferme SolidWorks uniquement si [`connect`](Self::connect) l'a démarré.

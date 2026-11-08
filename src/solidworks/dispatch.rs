@@ -4,7 +4,7 @@ use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::System::Com::{IDispatch, DISPATCH_FLAGS, DISPPARAMS, SAFEARRAY};
 use windows::Win32::System::Ole::{SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound};
 use windows::Win32::System::Variant::{
-    VARENUM, VARIANT, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_I4,
+    VARENUM, VARIANT, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_I4, VT_VARIANT,
 };
 
 /// Appelle un membre COM identifié par son nom via `IDispatch`.
@@ -101,6 +101,45 @@ pub(super) fn string_array_from_variant(variant: &mut VARIANT) -> Result<Vec<Str
             values.push(value.to_string());
         }
         Ok(values)
+    }
+}
+
+/// Extrait les interfaces d'un tableau `SAFEARRAY` de variants ou d'interfaces.
+///
+/// # Errors
+/// Renvoie une erreur si la lecture des limites ou d'un élément du tableau échoue.
+pub(super) fn dispatch_array_from_variant(variant: &mut VARIANT) -> Result<Vec<IDispatch>> {
+    unsafe {
+        let raw = &mut variant.Anonymous.Anonymous;
+        let array_type = raw.vt;
+        if array_type != VARENUM(VT_ARRAY.0 | VT_DISPATCH.0)
+            && array_type != VARENUM(VT_ARRAY.0 | VT_VARIANT.0)
+        {
+            return Ok(Vec::new());
+        }
+
+        let array: *mut SAFEARRAY = raw.Anonymous.parray;
+        let lower_bound = SafeArrayGetLBound(array, 1)?;
+        let upper_bound = SafeArrayGetUBound(array, 1)?;
+        let mut dispatches = Vec::new();
+
+        for index in lower_bound..=upper_bound {
+            if array_type == VARENUM(VT_ARRAY.0 | VT_DISPATCH.0) {
+                let mut dispatch: Option<IDispatch> = None;
+                SafeArrayGetElement(array, &index, &mut dispatch as *mut _ as *mut _)?;
+                if let Some(dispatch) = dispatch {
+                    dispatches.push(dispatch);
+                }
+            } else {
+                let mut item = VARIANT::default();
+                SafeArrayGetElement(array, &index, &mut item as *mut VARIANT as *mut _)?;
+                if let Some(dispatch) = optional_dispatch_from_variant(&item) {
+                    dispatches.push(dispatch);
+                }
+            }
+        }
+
+        Ok(dispatches)
     }
 }
 
