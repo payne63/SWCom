@@ -1,5 +1,8 @@
-use std::sync::mpsc::{self, Receiver, TryRecvError};
 use std::thread;
+use std::{
+    collections::HashMap,
+    sync::mpsc::{self, Receiver, TryRecvError},
+};
 
 use egui::{Align, CentralPanel, Color32, Grid, Layout, ScrollArea, TextEdit, TopBottomPanel};
 use rfd::FileDialog;
@@ -25,6 +28,7 @@ struct AppTab {
     kind: TabKind,
     assembly_file_path: String,
     assembly_parts: Vec<AssemblyItem>,
+    assembly_thumbnails: HashMap<String, egui::TextureHandle>,
     assembly_loaded: bool,
     assembly_status: Option<String>,
     assembly_status_is_error: bool,
@@ -70,6 +74,7 @@ impl PropertiesGui {
                     kind: TabKind::SolidWorksProperties,
                     assembly_file_path: String::new(),
                     assembly_parts: Vec::new(),
+                    assembly_thumbnails: HashMap::new(),
                     assembly_loaded: false,
                     assembly_status: None,
                     assembly_status_is_error: false,
@@ -80,6 +85,7 @@ impl PropertiesGui {
                     kind: TabKind::AssemblyParts,
                     assembly_file_path: String::new(),
                     assembly_parts: Vec::new(),
+                    assembly_thumbnails: HashMap::new(),
                     assembly_loaded: false,
                     assembly_status: None,
                     assembly_status_is_error: false,
@@ -183,6 +189,7 @@ impl PropertiesGui {
 
         let file_path = tab.assembly_file_path.clone();
         tab.assembly_parts.clear();
+        tab.assembly_thumbnails.clear();
         tab.assembly_loaded = false;
         tab.assembly_status = None;
         self.start_worker(tab_id, context, move || {
@@ -205,6 +212,7 @@ impl PropertiesGui {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.assembly_file_path = path.display().to_string();
             tab.assembly_parts.clear();
+            tab.assembly_thumbnails.clear();
             tab.assembly_loaded = false;
             tab.assembly_status = None;
             tab.assembly_status_is_error = false;
@@ -256,7 +264,7 @@ impl PropertiesGui {
     }
 
     /// Applique à l'interface le résultat de la tâche lorsqu'il est disponible.
-    fn poll_worker_result(&mut self) {
+    fn poll_worker_result(&mut self, context: &egui::Context) {
         let result = self
             .result_receiver
             .as_ref()
@@ -294,9 +302,11 @@ impl PropertiesGui {
                     self.status_is_error = false;
                 }
                 Ok(WorkerOutcome::AssemblyComponentsLoaded(file_path, components)) => {
+                    let thumbnails = load_assembly_thumbnails(context, tab_id, &components);
                     if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                         tab.assembly_file_path = file_path;
                         tab.assembly_parts = components;
+                        tab.assembly_thumbnails = thumbnails;
                         tab.assembly_loaded = true;
                         tab.assembly_status = None;
                         tab.assembly_status_is_error = false;
@@ -366,6 +376,30 @@ fn run_solidworks_operation<T>(
     }
 }
 
+/// Crée une texture egui pour chaque aperçu disponible dans les composants.
+fn load_assembly_thumbnails(
+    context: &egui::Context,
+    tab_id: u64,
+    components: &[AssemblyItem],
+) -> HashMap<String, egui::TextureHandle> {
+    components
+        .iter()
+        .filter_map(|component| {
+            let thumbnail = component.thumbnail.as_ref()?;
+            let image = egui::ColorImage::from_rgba_unmultiplied(
+                [thumbnail.width, thumbnail.height],
+                &thumbnail.rgba,
+            );
+            let texture = context.load_texture(
+                format!("assembly-thumbnail-{tab_id}-{}", component.path),
+                image,
+                egui::TextureOptions::LINEAR,
+            );
+            Some((component.path.to_lowercase(), texture))
+        })
+        .collect()
+}
+
 impl eframe::App for PropertiesGui {
     /// Dessine la fenêtre et traite les actions de sélection, lecture et sauvegarde.
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
@@ -378,7 +412,7 @@ impl eframe::App for PropertiesGui {
             self.fonts_scaled = true;
         }
 
-        self.poll_worker_result();
+        self.poll_worker_result(context);
         context.set_visuals(if self.dark_mode {
             egui::Visuals::dark()
         } else {
@@ -394,6 +428,7 @@ impl eframe::App for PropertiesGui {
         let mut assembly_browse_tab_id = None;
         let mut assembly_process_tab_id = None;
         let mut assembly_path_changed_tab_id = None;
+        let mut hovered_thumbnail: Option<(String, egui::TextureHandle)> = None;
 
         TopBottomPanel::top("app_toolbar").show(context, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -444,6 +479,7 @@ impl eframe::App for PropertiesGui {
                 kind: TabKind::AssemblyParts,
                 assembly_file_path: String::new(),
                 assembly_parts: Vec::new(),
+                assembly_thumbnails: HashMap::new(),
                 assembly_loaded: false,
                 assembly_status: None,
                 assembly_status_is_error: false,
@@ -495,20 +531,27 @@ impl eframe::App for PropertiesGui {
                         ui.spinner();
                         ui.label("Traitement en cours…");
                     });
-                } else if let Some(status) = &self.status {
-                    let color = if self.status_is_error {
-                        Color32::LIGHT_RED
+                } else {
+                    let (status_text, status_color) = if let Some(status) = &self.status {
+                        let color = if self.status_is_error {
+                            Color32::LIGHT_RED
+                        } else {
+                            Color32::LIGHT_GREEN
+                        };
+                        (status.as_str(), color)
+                    } else if self.has_changes() {
+                        ("Modifications non enregistrées.", ui.visuals().text_color())
                     } else {
-                        Color32::LIGHT_GREEN
+                        (" ", ui.visuals().text_color())
                     };
-                    ui.colored_label(color, status);
-                } else if self.has_changes() {
-                    ui.label("Modifications non enregistrées.");
+                    ui.colored_label(status_color, status_text);
                 }
 
                 if !self.properties.is_empty() {
                     ui.separator();
-                    ScrollArea::vertical().show(ui, |ui| {
+                    ScrollArea::vertical()
+                        .id_salt("custom_properties_scroll")
+                        .show(ui, |ui| {
                         Grid::new("custom_properties")
                             .striped(true)
                             .num_columns(2)
@@ -517,12 +560,14 @@ impl eframe::App for PropertiesGui {
                                 ui.strong("Valeur");
                                 ui.end_row();
 
-                                for property in &mut self.properties {
+                                for (index, property) in self.properties.iter_mut().enumerate() {
                                     ui.label(&property.name);
-                                    ui.add(
-                                        TextEdit::singleline(&mut property.value)
-                                            .desired_width(f32::INFINITY),
-                                    );
+                                    ui.push_id(("custom_property_value", index), |ui| {
+                                        ui.add(
+                                            TextEdit::singleline(&mut property.value)
+                                                .desired_width(f32::INFINITY),
+                                        );
+                                    });
                                     ui.end_row();
                                 }
                             });
@@ -603,6 +648,9 @@ impl eframe::App for PropertiesGui {
                                     ui.end_row();
 
                                     for item in &tab.assembly_parts {
+                                        let thumbnail = tab
+                                            .assembly_thumbnails
+                                            .get(&item.path.to_lowercase());
                                         let (label, color) = match item.kind {
                                             AssemblyItemKind::Part => {
                                                 ("Pièce", Color32::LIGHT_BLUE)
@@ -614,16 +662,17 @@ impl eframe::App for PropertiesGui {
                                                 ("Assemblage", Color32::LIGHT_GREEN)
                                             }
                                         };
-                                        ui.with_layout(
+                                        let type_response = ui.with_layout(
                                             Layout::left_to_right(Align::Center),
                                             |ui| {
                                                 let icon_size = ui.text_style_height(
                                                     &egui::TextStyle::Body,
                                                 );
-                                                let (icon_rect, _) = ui.allocate_exact_size(
-                                                    egui::vec2(icon_size, icon_size),
-                                                    egui::Sense::hover(),
-                                                );
+                                                let (icon_rect, icon_response) =
+                                                    ui.allocate_exact_size(
+                                                        egui::vec2(icon_size, icon_size),
+                                                        egui::Sense::hover(),
+                                                    );
                                                 let painter = ui.painter_at(icon_rect);
                                                 let stroke = egui::Stroke::new(2.0_f32, color);
                                                 let left = icon_rect.left() + 3.0;
@@ -686,12 +735,34 @@ impl eframe::App for PropertiesGui {
                                                         );
                                                     }
                                                 }
-                                                ui.label(label);
+                                                (icon_response, ui.label(label))
                                             },
-                                        );
-                                        ui.label(&item.name);
-                                        ui.label(&item.path);
-                                        ui.label(item.quantity.to_string());
+                                        )
+                                        .inner;
+                                        if type_response.0.hovered() || type_response.1.hovered() {
+                                            hovered_thumbnail = thumbnail
+                                                .cloned()
+                                                .map(|texture| (item.name.clone(), texture));
+                                        }
+                                        let name_response = ui.label(&item.name);
+                                        if name_response.hovered() {
+                                            hovered_thumbnail = thumbnail
+                                                .cloned()
+                                                .map(|texture| (item.name.clone(), texture));
+                                        }
+                                        let path_response = ui.label(&item.path);
+                                        if path_response.hovered() {
+                                            hovered_thumbnail = thumbnail
+                                                .cloned()
+                                                .map(|texture| (item.name.clone(), texture));
+                                        }
+                                        let quantity_response =
+                                            ui.label(item.quantity.to_string());
+                                        if quantity_response.hovered() {
+                                            hovered_thumbnail = thumbnail
+                                                .cloned()
+                                                .map(|texture| (item.name.clone(), texture));
+                                        }
                                         ui.end_row();
                                     }
                                 });
@@ -703,12 +774,28 @@ impl eframe::App for PropertiesGui {
             }
         });
 
+        if let (Some((name, texture)), Some(pointer_position)) =
+            (hovered_thumbnail, context.pointer_hover_pos())
+        {
+            egui::Area::new(egui::Id::new("assembly_thumbnail_preview"))
+                .order(egui::Order::Tooltip)
+                .fixed_pos(pointer_position + egui::vec2(12.0, 12.0))
+                .interactable(false)
+                .show(context, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.label(name);
+                        ui.image((texture.id(), egui::vec2(288.0, 216.0)));
+                    });
+                });
+        }
+
         if file_path_changed {
             self.clear_loaded_properties();
         }
         if let Some(tab_id) = assembly_path_changed_tab_id {
             if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                 tab.assembly_parts.clear();
+                tab.assembly_thumbnails.clear();
                 tab.assembly_loaded = false;
                 tab.assembly_status = None;
                 tab.assembly_status_is_error = false;
