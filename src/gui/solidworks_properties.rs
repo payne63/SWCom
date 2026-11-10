@@ -81,6 +81,7 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut PropertiesGui, is_processing: bo
                         ui.strong("Valeur");
                         ui.end_row();
 
+<<<<<<< HEAD
                         let mut current_group = None;
                         for (index, property) in app.properties.iter_mut().enumerate() {
                             if current_group != Some(property.configuration) {
@@ -92,6 +93,9 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut PropertiesGui, is_processing: bo
                                 });
                                 ui.end_row();
                             }
+=======
+                        for (index, property) in app.properties.iter_mut().enumerate() {
+>>>>>>> d9695e7166ac6b1011da76a76661b1ab4ffa0346
                             ui.label(&property.name);
                             ui.push_id(("custom_property_value", index), |ui| {
                                 ui.add(
