@@ -61,11 +61,8 @@ pub struct CustomProperty {
     pub name: String,
     /// Valeur résolue de la propriété, ou sa valeur brute si aucune résolution n'est disponible.
     pub value: String,
-<<<<<<< HEAD
     /// Indique si la propriété appartient à la configuration active.
     pub configuration: bool,
-=======
->>>>>>> d9695e7166ac6b1011da76a76661b1ab4ffa0346
 }
 
 /// Ouvre ou réutilise un assemblage et retourne ses composants avec leurs quantités cumulées.
@@ -250,11 +247,8 @@ pub(super) fn get_file_properties(
     let (document, opened_by_this_call) =
         open_or_reuse_document(sw_app, file_path, document_type, 3)?;
 
-<<<<<<< HEAD
     let properties_result = read_document_and_configuration_properties(&document);
-=======
-    let properties_result = read_custom_properties(&document);
->>>>>>> d9695e7166ac6b1011da76a76661b1ab4ffa0346
+    // let properties_result = read_custom_properties(&document);
     if !opened_by_this_call {
         return properties_result;
     }
@@ -287,13 +281,10 @@ pub(super) fn update_file_properties(
     let (document, opened_by_this_call) =
         open_or_reuse_document(sw_app, file_path, document_type, 1)?;
 
-<<<<<<< HEAD
     let update_result = write_document_and_configuration_properties(&document, properties)
         .and_then(|()| save_document(&document));
-=======
-    let update_result =
-        write_custom_properties(&document, properties).and_then(|()| save_document(&document));
->>>>>>> d9695e7166ac6b1011da76a76661b1ab4ffa0346
+    // let update_result =
+    // write_custom_properties(&document, properties).and_then(|()| save_document(&document));
 
     if !opened_by_this_call {
         return update_result;
@@ -639,7 +630,6 @@ fn component_is_sheet_metal(component: &IDispatch) -> bool {
 /// # Errors
 /// Renvoie une erreur si SolidWorks ne fournit pas l'extension, le gestionnaire de propriétés
 /// ou si la lecture d'une propriété échoue.
-<<<<<<< HEAD
 fn read_document_and_configuration_properties(document: &IDispatch) -> Result<Vec<CustomProperty>> {
     let mut properties = read_custom_properties(&custom_property_manager(document)?, false)?;
     let configuration_manager = active_configuration_property_manager(document)?;
@@ -648,10 +638,6 @@ fn read_document_and_configuration_properties(document: &IDispatch) -> Result<Ve
 }
 
 fn read_custom_properties(manager: &IDispatch, configuration: bool) -> Result<Vec<CustomProperty>> {
-=======
-fn read_custom_properties(document: &IDispatch) -> Result<Vec<CustomProperty>> {
-    let manager = custom_property_manager(document)?;
->>>>>>> d9695e7166ac6b1011da76a76661b1ab4ffa0346
     let mut no_arguments = [];
     let mut names_variant = invoke(
         &manager,
@@ -685,20 +671,15 @@ fn read_custom_properties(document: &IDispatch) -> Result<Vec<CustomProperty>> {
             } else {
                 resolved
             };
-<<<<<<< HEAD
             Ok(CustomProperty {
                 name,
                 value,
                 configuration,
             })
-=======
-            Ok(CustomProperty { name, value })
->>>>>>> d9695e7166ac6b1011da76a76661b1ab4ffa0346
         })
         .collect()
 }
 
-<<<<<<< HEAD
 /// Écrit les propriétés au bon niveau : document ou configuration active.
 fn write_document_and_configuration_properties(
     document: &IDispatch,
@@ -728,12 +709,6 @@ fn write_document_and_configuration_properties(
 
 /// Remplace les valeurs des propriétés et vérifie le code retour de `Set2`.
 fn write_custom_properties(manager: &IDispatch, properties: &[CustomProperty]) -> Result<()> {
-=======
-/// Remplace les valeurs des propriétés et vérifie le code retour de `Set2`.
-fn write_custom_properties(document: &IDispatch, properties: &[CustomProperty]) -> Result<()> {
-    let manager = custom_property_manager(document)?;
-
->>>>>>> d9695e7166ac6b1011da76a76661b1ab4ffa0346
     for property in properties {
         let mut arguments = [variant_bstr(&property.value), variant_bstr(&property.name)];
         let result = invoke(&manager, "Set2", DISPATCH_METHOD, &mut arguments, true)?;
@@ -796,7 +771,6 @@ fn custom_property_manager(document: &IDispatch) -> Result<IDispatch> {
     dispatch_from_variant(&manager_variant)
 }
 
-<<<<<<< HEAD
 /// Récupère le gestionnaire des propriétés de la configuration active.
 fn active_configuration_property_manager(document: &IDispatch) -> Result<IDispatch> {
     let mut no_arguments = [];
@@ -828,8 +802,6 @@ fn active_configuration_property_manager(document: &IDispatch) -> Result<IDispat
     dispatch_from_variant(&property_manager_variant)
 }
 
-=======
->>>>>>> d9695e7166ac6b1011da76a76661b1ab4ffa0346
 #[cfg(test)]
 mod tests {
     use super::parse_bmp_thumbnail;
