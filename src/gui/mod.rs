@@ -793,7 +793,7 @@ impl eframe::App for PropertiesGui {
                         &tab.assembly_parts,
                         &path,
                     ) {
-                        Ok() => match crate::helper::XlsxHelper::open_file(&path) {
+                        Ok(()) => match crate::helper::XlsxHelper::open_file(&path) {
                             Ok(()) => {
                                 tab.assembly_status = Some(format!(
                                     "Export Excel créé et ouvert : {}",
