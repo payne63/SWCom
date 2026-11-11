@@ -793,11 +793,21 @@ impl eframe::App for PropertiesGui {
                         &tab.assembly_parts,
                         &path,
                     ) {
-                        Ok(()) => {
-                            tab.assembly_status =
-                                Some(format!("Export Excel créé : {}", path.display()));
-                            tab.assembly_status_is_error = false;
-                        }
+                        Ok() => match crate::helper::XlsxHelper::open_file(&path) {
+                            Ok(()) => {
+                                tab.assembly_status = Some(format!(
+                                    "Export Excel créé et ouvert : {}",
+                                    path.display()
+                                ));
+                                tab.assembly_status_is_error = false;
+                            }
+                            Err(error) => {
+                                tab.assembly_status = Some(format!(
+                                    "Export Excel créé, mais impossible de l'ouvrir : {error}"
+                                ));
+                                tab.assembly_status_is_error = true;
+                            }
+                        },
                         Err(error) => {
                             tab.assembly_status =
                                 Some(format!("Échec de l'export Excel : {error}"));
