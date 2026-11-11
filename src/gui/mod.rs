@@ -558,42 +558,67 @@ impl eframe::App for PropertiesGui {
         let active_tab_kind = active_tab.map_or(TabKind::SolidWorksProperties, |tab| tab.kind);
 
         let is_processing = self.is_processing;
-        if matches!(active_tab_kind, TabKind::AssemblyParts) {
-            let active_tab_id = self.active_tab_id;
-            let processing_active_tab =
-                is_processing && self.processing_tab_id == Some(active_tab_id);
-            let processing_other_tab =
-                is_processing && self.processing_tab_id != Some(active_tab_id);
-            let status = self
+        let active_tab_id = self.active_tab_id;
+        let processing_active_tab = is_processing && self.processing_tab_id == Some(active_tab_id);
+        let processing_other_tab = is_processing && self.processing_tab_id != Some(active_tab_id);
+        let status: Option<(String, Option<egui::Color32>)> = match active_tab_kind {
+            TabKind::SolidWorksProperties => self
+                .status
+                .as_ref()
+                .map(|status| {
+                    (
+                        status.clone(),
+                        Some(if self.status_is_error {
+                            egui::Color32::LIGHT_RED
+                        } else {
+                            egui::Color32::LIGHT_GREEN
+                        }),
+                    )
+                })
+                .or_else(|| {
+                    self.has_changes()
+                        .then(|| ("Modifications non enregistrées.".to_owned(), None))
+                }),
+            TabKind::AssemblyParts => self
                 .tabs
                 .iter()
                 .find(|tab| tab.id == active_tab_id)
                 .and_then(|tab| {
-                    tab.assembly_status
-                        .clone()
-                        .map(|status| (status, tab.assembly_status_is_error))
-                });
-
-            TopBottomPanel::bottom("assembly_operation_status")
-                .exact_height(30.0)
-                .show(context, |ui| {
-                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
-                        if processing_active_tab {
-                            ui.spinner();
-                            ui.label("Opération SolidWorks en cours…");
-                        } else if processing_other_tab {
-                            ui.label("Une autre opération est en cours…");
-                        } else if let Some((status, is_error)) = &status {
-                            let color = if *is_error {
+                    tab.assembly_status.as_ref().map(|status| {
+                        (
+                            status.clone(),
+                            Some(if tab.assembly_status_is_error {
                                 egui::Color32::LIGHT_RED
                             } else {
                                 egui::Color32::LIGHT_GREEN
-                            };
-                            ui.colored_label(color, status);
-                        }
-                    });
+                            }),
+                        )
+                    })
+                }),
+        };
+
+        TopBottomPanel::bottom("operation_status")
+            .exact_height(30.0)
+            .show(context, |ui| {
+                ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                    if processing_active_tab {
+                        ui.spinner();
+                        ui.label(
+                            if matches!(active_tab_kind, TabKind::SolidWorksProperties) {
+                                "Traitement des propriétés en cours…"
+                            } else {
+                                "Opération SolidWorks en cours…"
+                            },
+                        );
+                    } else if processing_other_tab {
+                        ui.label("Une autre opération est en cours…");
+                    } else if let Some((status, Some(color))) = &status {
+                        ui.colored_label(*color, status);
+                    } else if let Some((status, None)) = &status {
+                        ui.label(status);
+                    }
                 });
-        }
+            });
 
         CentralPanel::default().show(context, |ui| match active_tab_kind {
             TabKind::SolidWorksProperties => {
@@ -675,7 +700,10 @@ impl eframe::App for PropertiesGui {
                 .save_file()
             {
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                    match assembly_parts::export_to_xlsx(&tab.assembly_parts, &path) {
+                    match crate::helper::XlsxHelper::export_assembly_parts(
+                        &tab.assembly_parts,
+                        &path,
+                    ) {
                         Ok(()) => {
                             tab.assembly_status =
                                 Some(format!("Export Excel créé : {}", path.display()));

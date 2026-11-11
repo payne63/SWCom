@@ -1,6 +1,7 @@
 #![windows_subsystem = "windows"]
 
 mod gui;
+mod helper;
 mod solidworks;
 
 /// Lance la fenêtre native de l'application.
