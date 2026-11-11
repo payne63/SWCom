@@ -44,8 +44,7 @@ enum WorkerOutcome {
     PropertiesLoaded(String, Vec<CustomProperty>),
     /// Propriétés modifiées et sauvegardées.
     PropertiesUpdated,
-    /// Composants chargés pour le chemin d'assemblage indiqué.
-    AssemblyComponentsLoaded(String, Vec<AssemblyItem>),
+
     /// Arborescence et liste aplatie chargées pour le chemin indiqué.
     AssemblyTreeLoaded(String, AssemblyTreeNode, Vec<AssemblyItem>),
     /// Mises à plat DXF exportées et éventuels échecs par pièce.
@@ -185,7 +184,7 @@ impl PropertiesGui {
         });
     }
 
-    /// Lance la lecture aplatie des pièces d'un onglet d'assemblage.
+    /// Charge l'arbre et la liste aplatie des composants d'un assemblage.
     fn process_assembly_tab(&mut self, tab_id: u64, context: &egui::Context) {
         if self.is_processing {
             return;
@@ -203,34 +202,6 @@ impl PropertiesGui {
         tab.assembly_parts.clear();
         tab.assembly_tree = None;
         tab.assembly_tree_view = false;
-        tab.assembly_loaded = false;
-        tab.assembly_status = None;
-        self.start_worker(tab_id, context, move || {
-            let components = read_assembly_components_on_worker(&file_path)?;
-            Ok(WorkerOutcome::AssemblyComponentsLoaded(
-                file_path, components,
-            ))
-        });
-    }
-
-    /// Démarre la lecture hiérarchique des composants de l'assemblage.
-    fn process_assembly_tree_tab(&mut self, tab_id: u64, context: &egui::Context) {
-        if self.is_processing {
-            return;
-        }
-        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
-            return;
-        };
-        if tab.assembly_file_path.trim().is_empty() {
-            tab.assembly_status = Some("Sélectionnez un fichier .sldasm.".to_owned());
-            tab.assembly_status_is_error = true;
-            return;
-        }
-
-        let file_path = tab.assembly_file_path.clone();
-        tab.assembly_parts.clear();
-        tab.assembly_tree = None;
-        tab.assembly_tree_view = true;
         tab.assembly_loaded = false;
         tab.assembly_status = None;
         self.start_worker(tab_id, context, move || {
@@ -372,23 +343,12 @@ impl PropertiesGui {
                         Some("Les propriétés ont été mises à jour dans le fichier.".to_owned());
                     self.status_is_error = false;
                 }
-                Ok(WorkerOutcome::AssemblyComponentsLoaded(file_path, components)) => {
-                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
-                        tab.assembly_file_path = file_path;
-                        tab.assembly_parts = components;
-                        tab.assembly_tree = None;
-                        tab.assembly_tree_view = false;
-                        tab.assembly_loaded = true;
-                        tab.assembly_status = None;
-                        tab.assembly_status_is_error = false;
-                    }
-                }
+
                 Ok(WorkerOutcome::AssemblyTreeLoaded(file_path, tree, parts)) => {
                     if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                         tab.assembly_file_path = file_path;
                         tab.assembly_parts = parts;
                         tab.assembly_tree = Some(tree);
-                        tab.assembly_tree_view = true;
                         tab.assembly_loaded = true;
                         tab.assembly_status = None;
                         tab.assembly_status_is_error = false;
@@ -448,13 +408,6 @@ fn update_properties_on_worker(
     properties: &[CustomProperty],
 ) -> std::result::Result<(), String> {
     run_solidworks_operation(|sw_app| sw_app.update_file_properties(file_path, properties))
-}
-
-/// Initialise COM et lit les composants et quantités sur le thread de travail.
-fn read_assembly_components_on_worker(
-    file_path: &str,
-) -> std::result::Result<Vec<AssemblyItem>, String> {
-    run_solidworks_operation(|sw_app| sw_app.get_assembly_components(file_path))
 }
 
 /// Initialise COM et lit l'arbre et la liste aplatie sur le thread de travail.
@@ -526,7 +479,7 @@ impl eframe::App for PropertiesGui {
         let mut selected_tab_id = None;
         let mut assembly_browse_tab_id = None;
         let mut assembly_process_tab_id = None;
-        let mut assembly_tree_process_tab_id = None;
+
         let mut assembly_export_tab_id = None;
         let mut assembly_dxf_export_tab_id = None;
         let mut assembly_path_changed_tab_id = None;
@@ -657,9 +610,7 @@ impl eframe::App for PropertiesGui {
                     if actions.process_clicked {
                         assembly_process_tab_id = Some(tab.id);
                     }
-                    if actions.process_tree_clicked {
-                        assembly_tree_process_tab_id = Some(tab.id);
-                    }
+
                     if actions.export_clicked {
                         assembly_export_tab_id = Some(tab.id);
                     }
@@ -717,9 +668,7 @@ impl eframe::App for PropertiesGui {
                 }
             }
         }
-        if let Some(tab_id) = assembly_tree_process_tab_id {
-            self.process_assembly_tree_tab(tab_id, context);
-        }
+
         if let Some(tab_id) = assembly_dxf_export_tab_id {
             self.export_assembly_sheet_metal(tab_id, context);
         }

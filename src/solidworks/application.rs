@@ -97,17 +97,6 @@ impl SolidWorksApp {
         super::properties::update_file_properties(&self.dispatch, file_path, properties)
     }
 
-    /// Retourne les pièces, en distinguant la tôlerie, et les assemblages avec leurs quantités.
-    ///
-    /// # Arguments
-    /// * `file_path` — chemin d'un fichier `.sldasm`.
-    ///
-    /// # Errors
-    /// Renvoie une erreur si le document n'est pas un assemblage ou si un appel SolidWorks échoue.
-    pub fn get_assembly_components(&self, file_path: &str) -> Result<Vec<AssemblyItem>> {
-        super::properties::get_assembly_components(&self.dispatch, file_path)
-    }
-
     /// Retourne l'arborescence d'un assemblage et les quantités totales aplaties.
     ///
     /// Les composants identiques sont regroupés sous leur parent direct. Le second élément du
