@@ -21,6 +21,7 @@ const MAIN_TAB_ID: u64 = 0;
 
 #[derive(Clone, Copy)]
 enum TabKind {
+    Home,
     SolidWorksProperties,
     AssemblyParts,
 }
@@ -72,6 +73,7 @@ pub struct PropertiesGui {
     processing_tab_id: Option<u64>,
     has_processed: bool,
     fonts_scaled: bool,
+    home_texture: Option<egui::TextureHandle>,
     result_receiver: Option<Receiver<TaskResult>>,
 }
 
@@ -82,6 +84,18 @@ impl PropertiesGui {
             tabs: vec![
                 AppTab {
                     id: MAIN_TAB_ID,
+                    title: "Home".to_owned(),
+                    kind: TabKind::Home,
+                    assembly_file_path: String::new(),
+                    assembly_parts: Vec::new(),
+                    assembly_tree: None,
+                    assembly_tree_view: false,
+                    assembly_loaded: false,
+                    assembly_status: None,
+                    assembly_status_is_error: false,
+                },
+                AppTab {
+                    id: MAIN_TAB_ID + 1,
                     title: "Solidworks property".to_owned(),
                     kind: TabKind::SolidWorksProperties,
                     assembly_file_path: String::new(),
@@ -93,7 +107,7 @@ impl PropertiesGui {
                     assembly_status_is_error: false,
                 },
                 AppTab {
-                    id: MAIN_TAB_ID + 1,
+                    id: MAIN_TAB_ID + 2,
                     title: "Liste assemblage".to_owned(),
                     kind: TabKind::AssemblyParts,
                     assembly_file_path: String::new(),
@@ -117,6 +131,7 @@ impl PropertiesGui {
             processing_tab_id: None,
             has_processed: false,
             fonts_scaled: false,
+            home_texture: None,
             result_receiver: None,
         }
     }
@@ -507,6 +522,16 @@ fn run_solidworks_operation_with_shutdown<T>(
     }
 }
 
+/// Décode l'image PNG intégrée et la charge une fois comme texture egui.
+fn load_home_texture(context: &egui::Context) -> egui::TextureHandle {
+    let image = image::load_from_memory(include_bytes!("../images/evolution.png"))
+        .expect("L'image intégrée de l'onglet Home doit être un PNG valide")
+        .to_rgba8();
+    let size = [image.width() as usize, image.height() as usize];
+    let color_image = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+    context.load_texture("home-evolution", color_image, egui::TextureOptions::LINEAR)
+}
+
 impl eframe::App for PropertiesGui {
     /// Dessine la fenêtre et traite les actions de sélection, lecture et sauvegarde.
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
@@ -520,6 +545,9 @@ impl eframe::App for PropertiesGui {
         }
 
         self.poll_worker_result();
+        if self.home_texture.is_none() {
+            self.home_texture = Some(load_home_texture(context));
+        }
         context.set_visuals(if self.dark_mode {
             egui::Visuals::dark()
         } else {
@@ -586,6 +614,7 @@ impl eframe::App for PropertiesGui {
         let processing_active_tab = is_processing && self.processing_tab_id == Some(active_tab_id);
         let processing_other_tab = is_processing && self.processing_tab_id != Some(active_tab_id);
         let status: Option<(String, Option<egui::Color32>)> = match active_tab_kind {
+            TabKind::Home => None,
             TabKind::SolidWorksProperties => self
                 .status
                 .as_ref()
@@ -645,6 +674,34 @@ impl eframe::App for PropertiesGui {
             });
 
         CentralPanel::default().show(context, |ui| match active_tab_kind {
+            TabKind::Home => {
+                if let Some(texture) = &self.home_texture {
+                    let title = "SolidWorks Connector";
+                    let subtitle = "Application Vibe Coder avec Gpt 6.0 Luna";
+                    let joke = "Pour tous problèmes, merci de vous rapprocher d'une IA";
+                    let image_size = texture.size_vec2();
+                    let available_size = ui.available_size();
+                    let title_height = ui.text_style_height(&egui::TextStyle::Heading);
+                    let spacing = ui.spacing().item_spacing.y;
+                    let image_height_available =
+                        (available_size.y - title_height - spacing).max(0.0);
+                    let scale = (available_size.x / image_size.x)
+                        .min(image_height_available / image_size.y)
+                        .min(1.0);
+                    let displayed_image_size = image_size * scale;
+                    let group_height = title_height + spacing + displayed_image_size.y;
+                    ui.add_space(((available_size.y - group_height) * 0.5).max(0.0));
+                    ui.vertical_centered(|ui| {
+                        ui.heading(egui::RichText::new(title).italics().size(40.0));
+                        ui.add_space(spacing);
+                        ui.image((texture.id(), displayed_image_size));
+                        ui.add_space(spacing);
+                        ui.label(subtitle);
+                        ui.add_space(spacing);
+                        ui.label(joke);
+                    });
+                }
+            }
             TabKind::SolidWorksProperties => {
                 let actions = solidworks_properties::show(ui, self, is_processing);
                 browse_clicked = actions.browse_clicked;
@@ -733,7 +790,7 @@ impl eframe::App for PropertiesGui {
         if let Some((tab_id, file_path)) = open_component {
             self.open_component_in_solidworks(tab_id, file_path, context);
         } else if let Some(file_path) = show_component_properties {
-            self.active_tab_id = MAIN_TAB_ID;
+            self.active_tab_id = MAIN_TAB_ID + 1;
             self.file_path = file_path;
             self.clear_loaded_properties();
             self.process_file(context);

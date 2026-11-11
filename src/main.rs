@@ -12,7 +12,7 @@ fn main() -> eframe::Result<()> {
     };
 
     eframe::run_native(
-        "SolidWorks Connector",
+        "SolidWorks AI Connector",
         options,
         Box::new(|_creation_context| Ok(Box::new(gui::PropertiesGui::new()))),
     )
