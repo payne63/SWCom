@@ -1,6 +1,5 @@
 use std::thread;
 use std::{
-    collections::HashMap,
     path::PathBuf,
     sync::mpsc::{self, Receiver, TryRecvError},
 };
@@ -34,7 +33,6 @@ struct AppTab {
     assembly_parts: Vec<AssemblyItem>,
     assembly_tree: Option<AssemblyTreeNode>,
     assembly_tree_view: bool,
-    assembly_thumbnails: HashMap<String, egui::TextureHandle>,
     assembly_loaded: bool,
     assembly_status: Option<String>,
     assembly_status_is_error: bool,
@@ -89,7 +87,6 @@ impl PropertiesGui {
                     assembly_parts: Vec::new(),
                     assembly_tree: None,
                     assembly_tree_view: false,
-                    assembly_thumbnails: HashMap::new(),
                     assembly_loaded: false,
                     assembly_status: None,
                     assembly_status_is_error: false,
@@ -102,7 +99,6 @@ impl PropertiesGui {
                     assembly_parts: Vec::new(),
                     assembly_tree: None,
                     assembly_tree_view: false,
-                    assembly_thumbnails: HashMap::new(),
                     assembly_loaded: false,
                     assembly_status: None,
                     assembly_status_is_error: false,
@@ -115,7 +111,7 @@ impl PropertiesGui {
             original_properties: Vec::new(),
             status: None,
             status_is_error: false,
-            dark_mode: true,
+            dark_mode: false,
             is_processing: false,
             processing_tab_id: None,
             has_processed: false,
@@ -190,12 +186,7 @@ impl PropertiesGui {
     }
 
     /// Lance la lecture aplatie des pièces d'un onglet d'assemblage.
-    fn process_assembly_tab(
-        &mut self,
-        tab_id: u64,
-        context: &egui::Context,
-        include_thumbnails: bool,
-    ) {
+    fn process_assembly_tab(&mut self, tab_id: u64, context: &egui::Context) {
         if self.is_processing {
             return;
         }
@@ -212,11 +203,10 @@ impl PropertiesGui {
         tab.assembly_parts.clear();
         tab.assembly_tree = None;
         tab.assembly_tree_view = false;
-        tab.assembly_thumbnails.clear();
         tab.assembly_loaded = false;
         tab.assembly_status = None;
         self.start_worker(tab_id, context, move || {
-            let components = read_assembly_components_on_worker(&file_path, include_thumbnails)?;
+            let components = read_assembly_components_on_worker(&file_path)?;
             Ok(WorkerOutcome::AssemblyComponentsLoaded(
                 file_path, components,
             ))
@@ -241,7 +231,6 @@ impl PropertiesGui {
         tab.assembly_parts.clear();
         tab.assembly_tree = None;
         tab.assembly_tree_view = true;
-        tab.assembly_thumbnails.clear();
         tab.assembly_loaded = false;
         tab.assembly_status = None;
         self.start_worker(tab_id, context, move || {
@@ -295,7 +284,6 @@ impl PropertiesGui {
             tab.assembly_parts.clear();
             tab.assembly_tree = None;
             tab.assembly_tree_view = false;
-            tab.assembly_thumbnails.clear();
             tab.assembly_loaded = false;
             tab.assembly_status = None;
             tab.assembly_status_is_error = false;
@@ -347,7 +335,7 @@ impl PropertiesGui {
     }
 
     /// Applique à l'interface le résultat de la tâche lorsqu'il est disponible.
-    fn poll_worker_result(&mut self, context: &egui::Context) {
+    fn poll_worker_result(&mut self) {
         let result = self
             .result_receiver
             .as_ref()
@@ -385,13 +373,11 @@ impl PropertiesGui {
                     self.status_is_error = false;
                 }
                 Ok(WorkerOutcome::AssemblyComponentsLoaded(file_path, components)) => {
-                    let thumbnails = load_assembly_thumbnails(context, tab_id, &components);
                     if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                         tab.assembly_file_path = file_path;
                         tab.assembly_parts = components;
                         tab.assembly_tree = None;
                         tab.assembly_tree_view = false;
-                        tab.assembly_thumbnails = thumbnails;
                         tab.assembly_loaded = true;
                         tab.assembly_status = None;
                         tab.assembly_status_is_error = false;
@@ -403,7 +389,6 @@ impl PropertiesGui {
                         tab.assembly_parts = parts;
                         tab.assembly_tree = Some(tree);
                         tab.assembly_tree_view = true;
-                        tab.assembly_thumbnails.clear();
                         tab.assembly_loaded = true;
                         tab.assembly_status = None;
                         tab.assembly_status_is_error = false;
@@ -468,15 +453,8 @@ fn update_properties_on_worker(
 /// Initialise COM et lit les composants et quantités sur le thread de travail.
 fn read_assembly_components_on_worker(
     file_path: &str,
-    include_thumbnails: bool,
 ) -> std::result::Result<Vec<AssemblyItem>, String> {
-    run_solidworks_operation(|sw_app| {
-        if include_thumbnails {
-            sw_app.get_assembly_components(file_path)
-        } else {
-            sw_app.get_assembly_components_without_thumbnails(file_path)
-        }
-    })
+    run_solidworks_operation(|sw_app| sw_app.get_assembly_components(file_path))
 }
 
 /// Initialise COM et lit l'arbre et la liste aplatie sur le thread de travail.
@@ -522,30 +500,6 @@ fn run_solidworks_operation<T>(
     }
 }
 
-/// Crée une texture egui pour chaque aperçu disponible dans les composants.
-fn load_assembly_thumbnails(
-    context: &egui::Context,
-    tab_id: u64,
-    components: &[AssemblyItem],
-) -> HashMap<String, egui::TextureHandle> {
-    components
-        .iter()
-        .filter_map(|component| {
-            let thumbnail = component.thumbnail.as_ref()?;
-            let image = egui::ColorImage::from_rgba_unmultiplied(
-                [thumbnail.width, thumbnail.height],
-                &thumbnail.rgba,
-            );
-            let texture = context.load_texture(
-                format!("assembly-thumbnail-{tab_id}-{}", component.path),
-                image,
-                egui::TextureOptions::LINEAR,
-            );
-            Some((component.path.to_lowercase(), texture))
-        })
-        .collect()
-}
-
 impl eframe::App for PropertiesGui {
     /// Dessine la fenêtre et traite les actions de sélection, lecture et sauvegarde.
     fn update(&mut self, context: &egui::Context, _frame: &mut eframe::Frame) {
@@ -558,7 +512,7 @@ impl eframe::App for PropertiesGui {
             self.fonts_scaled = true;
         }
 
-        self.poll_worker_result(context);
+        self.poll_worker_result();
         context.set_visuals(if self.dark_mode {
             egui::Visuals::dark()
         } else {
@@ -576,7 +530,6 @@ impl eframe::App for PropertiesGui {
         let mut assembly_export_tab_id = None;
         let mut assembly_dxf_export_tab_id = None;
         let mut assembly_path_changed_tab_id = None;
-        let mut hovered_thumbnail: Option<(String, egui::TextureHandle)> = None;
 
         TopBottomPanel::top("app_toolbar").show(context, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -697,15 +650,12 @@ impl eframe::App for PropertiesGui {
                     .iter_mut()
                     .find(|tab| tab.id == self.active_tab_id)
                 {
-                    let (actions, preview) = assembly_parts::show(ui, tab, is_processing);
+                    let actions = assembly_parts::show(ui, tab, is_processing);
                     if actions.browse_clicked {
                         assembly_browse_tab_id = Some(tab.id);
                     }
                     if actions.process_clicked {
-                        assembly_process_tab_id = Some((tab.id, true));
-                    }
-                    if actions.process_without_thumbnails_clicked {
-                        assembly_process_tab_id = Some((tab.id, false));
+                        assembly_process_tab_id = Some(tab.id);
                     }
                     if actions.process_tree_clicked {
                         assembly_tree_process_tab_id = Some(tab.id);
@@ -719,27 +669,9 @@ impl eframe::App for PropertiesGui {
                     if actions.path_changed {
                         assembly_path_changed_tab_id = Some(tab.id);
                     }
-                    hovered_thumbnail = preview;
                 }
             }
         });
-
-        if let (Some((name, texture)), Some(pointer_position)) =
-            (hovered_thumbnail, context.pointer_hover_pos())
-        {
-            egui::Area::new(egui::Id::new("assembly_thumbnail_preview"))
-                .order(egui::Order::Tooltip)
-                .fixed_pos(pointer_position + egui::vec2(12.0, 12.0))
-                .interactable(false)
-                .show(context, |ui| {
-                    egui::Frame::popup(ui.style()).show(ui, |ui| {
-                        ui.label(name);
-                        let original_size = texture.size_vec2();
-                        let scale = (288.0 / original_size.x).min(216.0 / original_size.y);
-                        ui.image((texture.id(), original_size * scale));
-                    });
-                });
-        }
 
         if file_path_changed {
             self.clear_loaded_properties();
@@ -749,7 +681,6 @@ impl eframe::App for PropertiesGui {
                 tab.assembly_parts.clear();
                 tab.assembly_tree = None;
                 tab.assembly_tree_view = false;
-                tab.assembly_thumbnails.clear();
                 tab.assembly_loaded = false;
                 tab.assembly_status = None;
                 tab.assembly_status_is_error = false;
@@ -796,8 +727,8 @@ impl eframe::App for PropertiesGui {
             self.process_file(context);
         } else if update_clicked {
             self.update_file(context);
-        } else if let Some((tab_id, include_thumbnails)) = assembly_process_tab_id {
-            self.process_assembly_tab(tab_id, context, include_thumbnails);
+        } else if let Some(tab_id) = assembly_process_tab_id {
+            self.process_assembly_tab(tab_id, context);
         }
     }
 }

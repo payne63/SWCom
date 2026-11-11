@@ -9,7 +9,6 @@ use super::AppTab;
 pub(super) struct Actions {
     pub(super) browse_clicked: bool,
     pub(super) process_clicked: bool,
-    pub(super) process_without_thumbnails_clicked: bool,
     pub(super) process_tree_clicked: bool,
     pub(super) export_clicked: bool,
     pub(super) export_dxf_clicked: bool,
@@ -17,13 +16,8 @@ pub(super) struct Actions {
 }
 
 /// Affiche la liste aplatie des composants de l'assemblage courant.
-pub(super) fn show(
-    ui: &mut egui::Ui,
-    tab: &mut AppTab,
-    is_processing: bool,
-) -> (Actions, Option<(String, egui::TextureHandle)>) {
+pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> Actions {
     let mut actions = Actions::default();
-    let mut hovered_thumbnail = None;
 
     ui.heading("Liste a plat des composants");
     ui.label(
@@ -65,13 +59,7 @@ pub(super) fn show(
                         egui::Button::new("Afficher les composants").min_size(button_size),
                     )
                     .clicked();
-                actions.process_without_thumbnails_clicked = ui
-                    .add_enabled(
-                        !is_processing && !tab.assembly_file_path.trim().is_empty(),
-                        egui::Button::new("Afficher sans miniatures").min_size(button_size),
-                    )
-                    .on_hover_text("Charge la liste sans récupérer les aperçus des composants.")
-                    .clicked();
+
                 actions.process_tree_clicked = ui
                     .add_enabled(
                         !is_processing && !tab.assembly_file_path.trim().is_empty(),
@@ -123,8 +111,6 @@ pub(super) fn show(
                                     ui.end_row();
 
                                     for item in &tab.assembly_parts {
-                                        let thumbnail =
-                                            tab.assembly_thumbnails.get(&item.path.to_lowercase());
                                         let label = match item.kind {
                                             AssemblyItemKind::Part => "Pièce",
                                             AssemblyItemKind::SheetMetal => "Tôlerie",
@@ -132,108 +118,84 @@ pub(super) fn show(
                                         };
                                         let icon_color = ui.visuals().selection.stroke.color;
 
-                                        let type_response = ui
-                                            .with_layout(
-                                                Layout::left_to_right(Align::Center),
-                                                |ui| {
-                                                    let icon_size = ui
-                                                        .text_style_height(&egui::TextStyle::Body);
-                                                    let (icon_rect, icon_response) = ui
-                                                        .allocate_exact_size(
-                                                            egui::vec2(icon_size, icon_size),
-                                                            egui::Sense::hover(),
+                                        ui.with_layout(
+                                            Layout::left_to_right(Align::Center),
+                                            |ui| {
+                                                let icon_size =
+                                                    ui.text_style_height(&egui::TextStyle::Body);
+                                                let (icon_rect, _) = ui.allocate_exact_size(
+                                                    egui::vec2(icon_size, icon_size),
+                                                    egui::Sense::hover(),
+                                                );
+                                                let painter = ui.painter_at(icon_rect);
+                                                let stroke = egui::Stroke::new(2.0_f32, icon_color);
+                                                let left = icon_rect.left() + 3.0;
+                                                let right = icon_rect.right() - 3.0;
+                                                let top = icon_rect.top() + 3.0;
+                                                let bottom = icon_rect.bottom() - 3.0;
+
+                                                match item.kind {
+                                                    AssemblyItemKind::Part => {
+                                                        painter.circle_filled(
+                                                            icon_rect.center(),
+                                                            4.0,
+                                                            icon_color,
                                                         );
-                                                    let painter = ui.painter_at(icon_rect);
-                                                    let stroke =
-                                                        egui::Stroke::new(2.0_f32, icon_color);
-                                                    let left = icon_rect.left() + 3.0;
-                                                    let right = icon_rect.right() - 3.0;
-                                                    let top = icon_rect.top() + 3.0;
-                                                    let bottom = icon_rect.bottom() - 3.0;
-
-                                                    match item.kind {
-                                                        AssemblyItemKind::Part => {
-                                                            painter.circle_filled(
-                                                                icon_rect.center(),
-                                                                4.0,
-                                                                icon_color,
-                                                            );
-                                                        }
-                                                        AssemblyItemKind::SheetMetal => {
-                                                            painter.line_segment(
-                                                                [
-                                                                    egui::pos2(left, top),
-                                                                    egui::pos2(left, bottom),
-                                                                ],
-                                                                stroke,
-                                                            );
-                                                            painter.line_segment(
-                                                                [
-                                                                    egui::pos2(left, bottom),
-                                                                    egui::pos2(right, bottom),
-                                                                ],
-                                                                stroke,
-                                                            );
-                                                        }
-                                                        AssemblyItemKind::Assembly => {
-                                                            painter.line_segment(
-                                                                [
-                                                                    egui::pos2(left, top),
-                                                                    egui::pos2(right, top),
-                                                                ],
-                                                                stroke,
-                                                            );
-                                                            painter.line_segment(
-                                                                [
-                                                                    egui::pos2(right, top),
-                                                                    egui::pos2(right, bottom),
-                                                                ],
-                                                                stroke,
-                                                            );
-                                                            painter.line_segment(
-                                                                [
-                                                                    egui::pos2(right, bottom),
-                                                                    egui::pos2(left, bottom),
-                                                                ],
-                                                                stroke,
-                                                            );
-                                                            painter.line_segment(
-                                                                [
-                                                                    egui::pos2(left, bottom),
-                                                                    egui::pos2(left, top),
-                                                                ],
-                                                                stroke,
-                                                            );
-                                                        }
                                                     }
-                                                    (icon_response, ui.label(label))
-                                                },
-                                            )
-                                            .inner;
+                                                    AssemblyItemKind::SheetMetal => {
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(left, top),
+                                                                egui::pos2(left, bottom),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(left, bottom),
+                                                                egui::pos2(right, bottom),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                    }
+                                                    AssemblyItemKind::Assembly => {
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(left, top),
+                                                                egui::pos2(right, top),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(right, top),
+                                                                egui::pos2(right, bottom),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(right, bottom),
+                                                                egui::pos2(left, bottom),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                        painter.line_segment(
+                                                            [
+                                                                egui::pos2(left, bottom),
+                                                                egui::pos2(left, top),
+                                                            ],
+                                                            stroke,
+                                                        );
+                                                    }
+                                                }
+                                                ui.label(label);
+                                            },
+                                        );
 
-                                        if type_response.0.hovered() || type_response.1.hovered() {
-                                            hovered_thumbnail = thumbnail
-                                                .cloned()
-                                                .map(|texture| (item.name.clone(), texture));
-                                        }
-                                        let name_response = ui.label(&item.name);
-                                        if name_response.hovered() {
-                                            hovered_thumbnail = thumbnail
-                                                .cloned()
-                                                .map(|texture| (item.name.clone(), texture));
-                                        }
-                                        let path_response = ui.label(&item.path);
-                                        if path_response.hovered() {
-                                            hovered_thumbnail = thumbnail
-                                                .cloned()
-                                                .map(|texture| (item.name.clone(), texture));
-                                        }
-                                        let quantity_response = ui.label(item.quantity.to_string());
-                                        if quantity_response.hovered() {
-                                            hovered_thumbnail = thumbnail
-                                                .cloned()
-                                                .map(|texture| (item.name.clone(), texture));
-                                        }
+                                        ui.label(&item.name);
+                                        ui.label(&item.path);
+                                        ui.label(item.quantity.to_string());
                                         ui.end_row();
                                     }
                                 });
@@ -245,7 +207,7 @@ pub(super) fn show(
         );
     });
 
-    (actions, hovered_thumbnail)
+    actions
 }
 
 /// Affiche récursivement un nœud de l'arborescence et ses composants enfants.

@@ -2,7 +2,6 @@ use std::{
     collections::{HashMap, HashSet},
     fs,
     path::{Path, PathBuf},
-    sync::atomic::{AtomicU64, Ordering},
 };
 use windows::core::{Error, Result, BSTR, HRESULT};
 use windows::Win32::Foundation::VARIANT_BOOL;
@@ -15,19 +14,6 @@ use super::dispatch::{
     string_array_from_variant, variant_bool, variant_bstr, variant_i32,
 };
 
-static PREVIEW_FILE_COUNTER: AtomicU64 = AtomicU64::new(0);
-
-/// Vignette d'aperçu d'un document SolidWorks, au format RGBA.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct AssemblyThumbnail {
-    /// Largeur de l'image en pixels.
-    pub(crate) width: usize,
-    /// Hauteur de l'image en pixels.
-    pub(crate) height: usize,
-    /// Pixels RGBA, ligne par ligne de haut en bas.
-    pub(crate) rgba: Vec<u8>,
-}
-
 /// Un composant référencé par un assemblage et son nombre total d'occurrences.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssemblyItem {
@@ -39,8 +25,6 @@ pub struct AssemblyItem {
     pub path: String,
     /// Nombre total d'occurrences dans l'assemblage.
     pub quantity: usize,
-    /// Image miniature du fichier, si SolidWorks fournit un aperçu.
-    pub(crate) thumbnail: Option<AssemblyThumbnail>,
 }
 
 /// Type de document SolidWorks référencé dans la liste d'un assemblage.
@@ -94,7 +78,6 @@ pub struct CustomProperty {
 pub(super) fn get_assembly_components(
     sw_app: &IDispatch,
     file_path: &str,
-    include_thumbnails: bool,
 ) -> Result<Vec<AssemblyItem>> {
     if document_type(file_path)? != 2 {
         return Err(Error::new(
@@ -104,7 +87,7 @@ pub(super) fn get_assembly_components(
     }
 
     let (document, opened_by_this_call) = open_or_reuse_document(sw_app, file_path, 2, 3)?;
-    let parts_result = read_assembly_components(sw_app, &document, file_path, include_thumbnails);
+    let parts_result = read_assembly_components(&document, file_path);
     if !opened_by_this_call {
         return parts_result;
     }
@@ -423,12 +406,7 @@ fn close_document(sw_app: &IDispatch, document: &IDispatch, file_path: &str) -> 
 ///
 /// # Errors
 /// Renvoie une erreur si SolidWorks ne peut pas fournir la liste ou les informations des composants.
-fn read_assembly_components(
-    sw_app: &IDispatch,
-    document: &IDispatch,
-    master_path: &str,
-    include_thumbnails: bool,
-) -> Result<Vec<AssemblyItem>> {
+fn read_assembly_components(document: &IDispatch, master_path: &str) -> Result<Vec<AssemblyItem>> {
     let mut arguments = [variant_bool(false)];
     let mut components_variant = invoke(
         document,
@@ -440,32 +418,13 @@ fn read_assembly_components(
     let components = dispatch_array_from_variant(&mut components_variant)?;
     let mut totals: HashMap<String, AssemblyItem> = HashMap::new();
     let mut sheet_metal_by_path: HashMap<String, bool> = HashMap::new();
-    let mut thumbnails_by_path: HashMap<String, Option<AssemblyThumbnail>> = HashMap::new();
 
     let master_name = Path::new(master_path)
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or(master_path)
         .to_owned();
-    let master_thumbnail = if include_thumbnails {
-        let master_configuration = invoke(
-            document,
-            "GetActiveConfiguration",
-            DISPATCH_METHOD,
-            &mut [],
-            true,
-        )
-        .and_then(|configuration| dispatch_from_variant(&configuration))
-        .and_then(|configuration| {
-            invoke_string(&configuration, "Name", DISPATCH_PROPERTYGET, &mut [])
-        })
-        .unwrap_or_else(|_| "Default".to_owned());
-        let thumbnail = get_preview_thumbnail(sw_app, master_path, &master_configuration);
-        thumbnails_by_path.insert(master_path.to_lowercase(), thumbnail.clone());
-        thumbnail
-    } else {
-        None
-    };
+
     totals.insert(
         master_path.to_lowercase(),
         AssemblyItem {
@@ -473,7 +432,6 @@ fn read_assembly_components(
             name: master_name,
             path: master_path.to_owned(),
             quantity: 1,
-            thumbnail: master_thumbnail,
         },
     );
 
@@ -512,28 +470,11 @@ fn read_assembly_components(
             .and_then(|name| name.to_str())
             .unwrap_or(&path)
             .to_owned();
-        let thumbnail = if include_thumbnails {
-            thumbnails_by_path.get(&key).cloned().unwrap_or_else(|| {
-                let configuration = invoke_string(
-                    &component,
-                    "ReferencedConfiguration",
-                    DISPATCH_PROPERTYGET,
-                    &mut [],
-                )
-                .unwrap_or_else(|_| "Default".to_owned());
-                let thumbnail = get_preview_thumbnail(sw_app, &path, &configuration);
-                thumbnails_by_path.insert(key.clone(), thumbnail.clone());
-                thumbnail
-            })
-        } else {
-            None
-        };
         let entry = totals.entry(key).or_insert(AssemblyItem {
             kind,
             name,
             path,
             quantity: 0,
-            thumbnail,
         });
         entry.quantity += 1;
     }
@@ -694,120 +635,12 @@ fn accumulate_tree_quantities(
         name: node.name.clone(),
         path: node.path.clone(),
         quantity: 0,
-        thumbnail: None,
     });
     item.quantity = item.quantity.saturating_add(total_quantity);
 
     for child in &node.children {
         accumulate_tree_quantities(child, total_quantity, totals);
     }
-}
-
-/// Récupère l'aperçu enregistré du document SolidWorks dans un BMP temporaire.
-///
-/// L'absence d'aperçu n'interrompt pas la lecture de la liste d'assemblage.
-fn get_preview_thumbnail(
-    sw_app: &IDispatch,
-    file_path: &str,
-    configuration: &str,
-) -> Option<AssemblyThumbnail> {
-    let counter = PREVIEW_FILE_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let preview_path = std::env::temp_dir().join(format!(
-        "solidworks-preview-{}-{counter}.bmp",
-        std::process::id()
-    ));
-    let _ = fs::remove_file(&preview_path);
-    let preview_path_string = preview_path.to_string_lossy().into_owned();
-    let mut arguments = [
-        variant_bstr(&preview_path_string),
-        variant_bstr(configuration),
-        variant_bstr(file_path),
-    ];
-
-    let thumbnail = invoke(
-        sw_app,
-        "GetPreviewBitmapFile",
-        DISPATCH_METHOD,
-        &mut arguments,
-        true,
-    )
-    .and_then(|result| bool_from_variant(&result))
-    .ok()
-    .filter(|success| *success)
-    .and_then(|_| fs::read(&preview_path).ok())
-    .and_then(|bytes| parse_bmp_thumbnail(&bytes));
-
-    let _ = fs::remove_file(preview_path);
-    thumbnail
-}
-
-/// Décode un BMP non compressé 24 ou 32 bits en pixels RGBA.
-fn parse_bmp_thumbnail(bytes: &[u8]) -> Option<AssemblyThumbnail> {
-    let read_u16 = |offset: usize| {
-        Some(u16::from_le_bytes(
-            bytes.get(offset..offset.checked_add(2)?)?.try_into().ok()?,
-        ))
-    };
-    let read_u32 = |offset: usize| {
-        Some(u32::from_le_bytes(
-            bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
-        ))
-    };
-
-    if bytes.get(0..2)? != b"BM" {
-        return None;
-    }
-    let pixel_offset = usize::try_from(read_u32(10)?).ok()?;
-    let header_size = usize::try_from(read_u32(14)?).ok()?;
-    if header_size < 40
-        || 14_usize.checked_add(header_size)? > bytes.len()
-        || pixel_offset < 14_usize.checked_add(header_size)?
-    {
-        return None;
-    }
-
-    let width_signed = i32::from_le_bytes(bytes.get(18..22)?.try_into().ok()?);
-    let height_signed = i32::from_le_bytes(bytes.get(22..26)?.try_into().ok()?);
-    let width = usize::try_from(width_signed).ok()?;
-    let height = usize::try_from(height_signed.unsigned_abs()).ok()?;
-    let bits_per_pixel = read_u16(28)?;
-    if width == 0
-        || height == 0
-        || width > 4096
-        || height > 4096
-        || width.checked_mul(height)? > 16_000_000
-        || !matches!(bits_per_pixel, 24 | 32)
-        || read_u32(30)? != 0
-    {
-        return None;
-    }
-
-    let bytes_per_pixel = usize::from(bits_per_pixel / 8);
-    let row_stride = width.checked_mul(bytes_per_pixel)?.checked_add(3)? & !3;
-    let pixel_data_size = row_stride.checked_mul(height)?;
-    if pixel_offset.checked_add(pixel_data_size)? > bytes.len() {
-        return None;
-    }
-
-    let mut rgba = Vec::with_capacity(width.checked_mul(height)?.checked_mul(4)?);
-    for y in 0..height {
-        let source_y = if height_signed > 0 { height - 1 - y } else { y };
-        for x in 0..width {
-            let source = pixel_offset + source_y * row_stride + x * bytes_per_pixel;
-            let alpha = if bytes_per_pixel == 4 && bytes[source + 3] != 0 {
-                bytes[source + 3]
-            } else {
-                255
-            };
-            rgba.extend_from_slice(&[bytes[source + 2], bytes[source + 1], bytes[source], alpha]);
-        }
-    }
-
-    Some(AssemblyThumbnail {
-        width,
-        height,
-        rgba,
-    })
 }
 
 /// Indique si un composant contient au moins un corps solide de tôlerie.
@@ -1020,9 +853,7 @@ fn active_configuration_property_manager(document: &IDispatch) -> Result<IDispat
 mod tests {
     use std::collections::HashMap;
 
-    use super::{
-        accumulate_tree_quantities, parse_bmp_thumbnail, AssemblyItemKind, AssemblyTreeNode,
-    };
+    use super::{accumulate_tree_quantities, AssemblyItemKind, AssemblyTreeNode};
 
     #[test]
     fn flattens_tree_quantities_through_repeated_subassemblies() {
@@ -1052,26 +883,5 @@ mod tests {
         assert_eq!(totals["c:/master.sldasm"].quantity, 1);
         assert_eq!(totals["c:/sub.sldasm"].quantity, 2);
         assert_eq!(totals["c:/part.sldprt"].quantity, 6);
-    }
-
-    #[test]
-    fn decodes_bottom_up_24_bit_bmp_to_top_down_rgba() {
-        let mut bmp = vec![0_u8; 54];
-        bmp[0..2].copy_from_slice(b"BM");
-        bmp[2..6].copy_from_slice(&62_u32.to_le_bytes());
-        bmp[10..14].copy_from_slice(&54_u32.to_le_bytes());
-        bmp[14..18].copy_from_slice(&40_u32.to_le_bytes());
-        bmp[18..22].copy_from_slice(&1_i32.to_le_bytes());
-        bmp[22..26].copy_from_slice(&2_i32.to_le_bytes());
-        bmp[26..28].copy_from_slice(&1_u16.to_le_bytes());
-        bmp[28..30].copy_from_slice(&24_u16.to_le_bytes());
-        bmp[30..34].copy_from_slice(&0_u32.to_le_bytes());
-        bmp[34..38].copy_from_slice(&8_u32.to_le_bytes());
-        bmp.extend_from_slice(&[0, 255, 0, 0, 0, 0, 255, 0]);
-
-        let thumbnail = parse_bmp_thumbnail(&bmp).expect("valid BMP should decode");
-
-        assert_eq!((thumbnail.width, thumbnail.height), (1, 2));
-        assert_eq!(thumbnail.rgba, [255, 0, 0, 255, 0, 255, 0, 255]);
     }
 }

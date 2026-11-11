@@ -105,23 +105,7 @@ impl SolidWorksApp {
     /// # Errors
     /// Renvoie une erreur si le document n'est pas un assemblage ou si un appel SolidWorks échoue.
     pub fn get_assembly_components(&self, file_path: &str) -> Result<Vec<AssemblyItem>> {
-        super::properties::get_assembly_components(&self.dispatch, file_path, true)
-    }
-
-    /// Retourne les composants d'un assemblage sans lire leurs miniatures.
-    ///
-    /// Cette variante est plus rapide lorsque l'aperçu au survol n'est pas nécessaire.
-    ///
-    /// # Arguments
-    /// * `file_path` — chemin d'un fichier `.sldasm`.
-    ///
-    /// # Errors
-    /// Renvoie une erreur si le document n'est pas un assemblage ou si un appel SolidWorks échoue.
-    pub fn get_assembly_components_without_thumbnails(
-        &self,
-        file_path: &str,
-    ) -> Result<Vec<AssemblyItem>> {
-        super::properties::get_assembly_components(&self.dispatch, file_path, false)
+        super::properties::get_assembly_components(&self.dispatch, file_path)
     }
 
     /// Retourne l'arborescence d'un assemblage et les quantités totales aplaties.
