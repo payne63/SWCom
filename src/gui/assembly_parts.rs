@@ -110,17 +110,12 @@ pub(super) fn show(
                                     for item in &tab.assembly_parts {
                                         let thumbnail =
                                             tab.assembly_thumbnails.get(&item.path.to_lowercase());
-                                        let (label, color) = match item.kind {
-                                            AssemblyItemKind::Part => {
-                                                ("Pièce", Color32::LIGHT_BLUE)
-                                            }
-                                            AssemblyItemKind::SheetMetal => {
-                                                ("Tôlerie", Color32::LIGHT_YELLOW)
-                                            }
-                                            AssemblyItemKind::Assembly => {
-                                                ("Assemblage", Color32::LIGHT_GREEN)
-                                            }
+                                        let label = match item.kind {
+                                            AssemblyItemKind::Part => "Pièce",
+                                            AssemblyItemKind::SheetMetal => "Tôlerie",
+                                            AssemblyItemKind::Assembly => "Assemblage",
                                         };
+                                        let icon_color = ui.visuals().selection.stroke.color;
 
                                         let type_response = ui
                                             .with_layout(
@@ -135,7 +130,7 @@ pub(super) fn show(
                                                         );
                                                     let painter = ui.painter_at(icon_rect);
                                                     let stroke =
-                                                        egui::Stroke::new(2.0_f32, color);
+                                                        egui::Stroke::new(2.0_f32, icon_color);
                                                     let left = icon_rect.left() + 3.0;
                                                     let right = icon_rect.right() - 3.0;
                                                     let top = icon_rect.top() + 3.0;
@@ -146,7 +141,7 @@ pub(super) fn show(
                                                             painter.circle_filled(
                                                                 icon_rect.center(),
                                                                 4.0,
-                                                                color,
+                                                                icon_color,
                                                             );
                                                         }
                                                         AssemblyItemKind::SheetMetal => {
