@@ -1,4 +1,4 @@
-use egui::{Align, Color32, Grid, Layout, ScrollArea, TextEdit};
+use egui::{Align, Grid, Layout, ScrollArea, TextEdit};
 
 use crate::solidworks::AssemblyItemKind;
 
@@ -134,7 +134,8 @@ pub(super) fn show(
                                                             egui::Sense::hover(),
                                                         );
                                                     let painter = ui.painter_at(icon_rect);
-                                                    let stroke = egui::Stroke::new(2.0_f32, color);
+                                                    let stroke =
+                                                        egui::Stroke::new(2.0_f32, color);
                                                     let left = icon_rect.left() + 3.0;
                                                     let right = icon_rect.right() - 3.0;
                                                     let top = icon_rect.top() + 3.0;
