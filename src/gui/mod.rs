@@ -44,6 +44,8 @@ enum WorkerOutcome {
     PropertiesLoaded(String, Vec<CustomProperty>),
     /// Propriétés modifiées et sauvegardées.
     PropertiesUpdated,
+    /// Document ouvert et activé dans SolidWorks.
+    SolidWorksDocumentActivated(String),
 
     /// Arborescence et liste aplatie chargées pour le chemin indiqué.
     AssemblyTreeLoaded(String, AssemblyTreeNode, Vec<AssemblyItem>),
@@ -210,6 +212,27 @@ impl PropertiesGui {
         });
     }
 
+    /// Ouvre un composant dans SolidWorks sans fermer l'application à la fin de l'opération.
+    fn open_component_in_solidworks(
+        &mut self,
+        tab_id: u64,
+        file_path: String,
+        context: &egui::Context,
+    ) {
+        if self.is_processing {
+            return;
+        }
+        if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+            tab.assembly_status = None;
+            tab.assembly_status_is_error = false;
+        }
+
+        self.start_worker(tab_id, context, move || {
+            open_document_in_solidworks_on_worker(&file_path)?;
+            Ok(WorkerOutcome::SolidWorksDocumentActivated(file_path))
+        });
+    }
+
     /// Démarre l'extraction des mises à plat des pièces de tôlerie de l'onglet.
     fn export_assembly_sheet_metal(&mut self, tab_id: u64, context: &egui::Context) {
         if self.is_processing {
@@ -343,6 +366,13 @@ impl PropertiesGui {
                         Some("Les propriétés ont été mises à jour dans le fichier.".to_owned());
                     self.status_is_error = false;
                 }
+                Ok(WorkerOutcome::SolidWorksDocumentActivated(file_path)) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        tab.assembly_status =
+                            Some(format!("Document activé dans SolidWorks : {file_path}"));
+                        tab.assembly_status_is_error = false;
+                    }
+                }
 
                 Ok(WorkerOutcome::AssemblyTreeLoaded(file_path, tree, parts)) => {
                     if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
@@ -410,6 +440,11 @@ fn update_properties_on_worker(
     run_solidworks_operation(|sw_app| sw_app.update_file_properties(file_path, properties))
 }
 
+/// Ouvre un document et met SolidWorks au premier plan sur le thread COM.
+fn open_document_in_solidworks_on_worker(file_path: &str) -> std::result::Result<(), String> {
+    run_solidworks_operation_without_shutdown(|sw_app| sw_app.open_file_and_activate(file_path))
+}
+
 /// Initialise COM et lit l'arbre et la liste aplatie sur le thread de travail.
 fn read_assembly_tree_on_worker(
     file_path: &str,
@@ -431,15 +466,34 @@ fn export_sheet_metal_dxf_on_worker(
 fn run_solidworks_operation<T>(
     operation: impl FnOnce(&SolidWorksApp) -> windows::core::Result<T>,
 ) -> std::result::Result<T, String> {
+    run_solidworks_operation_with_shutdown(operation, true)
+}
+
+/// Exécute une opération SolidWorks sans fermer l'instance après son exécution.
+fn run_solidworks_operation_without_shutdown<T>(
+    operation: impl FnOnce(&SolidWorksApp) -> windows::core::Result<T>,
+) -> std::result::Result<T, String> {
+    run_solidworks_operation_with_shutdown(operation, false)
+}
+
+/// Initialise COM et choisit si l'instance SolidWorks doit être arrêtée après l'opération.
+fn run_solidworks_operation_with_shutdown<T>(
+    operation: impl FnOnce(&SolidWorksApp) -> windows::core::Result<T>,
+    shutdown_after: bool,
+) -> std::result::Result<T, String> {
     let com_apartment = ComApartment::initialize()
         .map_err(|error| format!("Initialisation COM impossible : {error:?}"))?;
     let sw_app = SolidWorksApp::connect()
         .map_err(|error| format!("Connexion à SolidWorks impossible : {error:?}"))?;
 
     let operation_result = operation(&sw_app).map_err(|error| format!("{error:?}"));
-    let shutdown_result = sw_app
-        .shutdown()
-        .map_err(|error| format!("Fermeture de SolidWorks impossible : {error:?}"));
+    let shutdown_result = if shutdown_after {
+        sw_app
+            .shutdown()
+            .map_err(|error| format!("Fermeture de SolidWorks impossible : {error:?}"))
+    } else {
+        Ok(())
+    };
 
     drop(sw_app);
     drop(com_apartment);
@@ -479,7 +533,8 @@ impl eframe::App for PropertiesGui {
         let mut selected_tab_id = None;
         let mut assembly_browse_tab_id = None;
         let mut assembly_process_tab_id = None;
-
+        let mut open_component = None;
+        let mut show_component_properties = None;
         let mut assembly_export_tab_id = None;
         let mut assembly_dxf_export_tab_id = None;
         let mut assembly_path_changed_tab_id = None;
@@ -610,6 +665,12 @@ impl eframe::App for PropertiesGui {
                     if actions.process_clicked {
                         assembly_process_tab_id = Some(tab.id);
                     }
+                    if let Some(file_path) = actions.open_in_solidworks {
+                        open_component = Some((tab.id, file_path));
+                    }
+                    if let Some(file_path) = actions.show_properties {
+                        show_component_properties = Some(file_path);
+                    }
 
                     if actions.export_clicked {
                         assembly_export_tab_id = Some(tab.id);
@@ -669,10 +730,16 @@ impl eframe::App for PropertiesGui {
             }
         }
 
-        if let Some(tab_id) = assembly_dxf_export_tab_id {
+        if let Some((tab_id, file_path)) = open_component {
+            self.open_component_in_solidworks(tab_id, file_path, context);
+        } else if let Some(file_path) = show_component_properties {
+            self.active_tab_id = MAIN_TAB_ID;
+            self.file_path = file_path;
+            self.clear_loaded_properties();
+            self.process_file(context);
+        } else if let Some(tab_id) = assembly_dxf_export_tab_id {
             self.export_assembly_sheet_metal(tab_id, context);
-        }
-        if process_clicked {
+        } else if process_clicked {
             self.process_file(context);
         } else if update_clicked {
             self.update_file(context);

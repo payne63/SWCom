@@ -4,14 +4,16 @@ use std::{
     path::{Path, PathBuf},
 };
 use windows::core::{Error, Result, BSTR, HRESULT};
-use windows::Win32::Foundation::VARIANT_BOOL;
+use windows::Win32::Foundation::{HWND, VARIANT_BOOL};
 use windows::Win32::System::Com::{IDispatch, DISPATCH_METHOD, DISPATCH_PROPERTYGET};
 use windows::Win32::System::Variant::VARIANT;
+use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE};
 
 use super::dispatch::{
     bool_from_variant, byref_bool, byref_bstr, byref_i32, dispatch_array_from_variant,
-    dispatch_from_variant, i32_from_variant, invoke, invoke_string, optional_dispatch_from_variant,
-    string_array_from_variant, variant_bool, variant_bstr, variant_i32,
+    dispatch_from_variant, i32_from_variant, i64_from_variant, invoke, invoke_string,
+    optional_dispatch_from_variant, string_array_from_variant, variant_bool, variant_bstr,
+    variant_i32,
 };
 
 /// Un composant référencé par un assemblage et son nombre total d'occurrences.
@@ -254,6 +256,48 @@ pub(super) fn get_file_properties(
         close_result?;
         Ok(properties)
     })
+}
+
+/// Ouvre ou réutilise un document, l'active et place la fenêtre SolidWorks au premier plan.
+///
+/// Le document reste ouvert après l'appel.
+///
+/// # Errors
+/// Renvoie une erreur si le chemin est invalide ou si l'ouverture, l'activation ou la mise
+/// au premier plan échoue.
+pub(super) fn open_file_and_activate(sw_app: &IDispatch, file_path: &str) -> Result<()> {
+    let document_type = document_type(file_path)?;
+    let (document, _) = open_or_reuse_document(sw_app, file_path, document_type, 1)?;
+    let title = invoke_string(&document, "GetTitle", DISPATCH_METHOD, &mut [])?;
+    let mut errors = 0_i32;
+    let mut activate_arguments = [
+        byref_i32(&mut errors),
+        variant_i32(0),
+        variant_bool(false),
+        variant_bstr(&title),
+    ];
+    invoke(
+        sw_app,
+        "ActivateDoc3",
+        DISPATCH_METHOD,
+        &mut activate_arguments,
+        true,
+    )?;
+
+    let frame_variant = invoke(sw_app, "Frame", DISPATCH_PROPERTYGET, &mut [], true)?;
+    let frame = dispatch_from_variant(&frame_variant)?;
+    let window_handle = invoke(&frame, "GetHWndx64", DISPATCH_METHOD, &mut [], true)
+        .and_then(|value| i64_from_variant(&value).map(|handle| handle as isize))
+        .or_else(|_| {
+            invoke(&frame, "GetHWnd", DISPATCH_METHOD, &mut [], true)
+                .and_then(|value| i32_from_variant(&value).map(|handle| handle as isize))
+        })?;
+    let window = HWND(window_handle);
+    unsafe {
+        ShowWindow(window, SW_RESTORE);
+        SetForegroundWindow(window);
+    }
+    Ok(())
 }
 
 /// Met à jour les propriétés indiquées puis sauvegarde le document.

@@ -4,7 +4,7 @@ use windows::Win32::Foundation::VARIANT_BOOL;
 use windows::Win32::System::Com::{IDispatch, DISPATCH_FLAGS, DISPPARAMS, SAFEARRAY};
 use windows::Win32::System::Ole::{SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound};
 use windows::Win32::System::Variant::{
-    VARENUM, VARIANT, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_I4, VT_VARIANT,
+    VARENUM, VARIANT, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_I4, VT_I8, VT_VARIANT,
 };
 
 /// Appelle un membre COM identifié par son nom via `IDispatch`.
@@ -184,6 +184,20 @@ pub(super) fn i32_from_variant(variant: &VARIANT) -> Result<i32> {
             return Err(windows::core::Error::from_win32());
         }
         Ok(raw.Anonymous.lVal)
+    }
+}
+
+/// Lit un entier signé de 64 bits depuis un `VARIANT`.
+///
+/// # Errors
+/// Renvoie une erreur si le variant n'est pas de type `VT_I8`.
+pub(super) fn i64_from_variant(variant: &VARIANT) -> Result<i64> {
+    unsafe {
+        let raw = &variant.Anonymous.Anonymous;
+        if raw.vt != VT_I8 {
+            return Err(windows::core::Error::from_win32());
+        }
+        Ok(raw.Anonymous.llVal)
     }
 }
 

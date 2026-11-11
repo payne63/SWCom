@@ -9,6 +9,8 @@ use super::AppTab;
 pub(super) struct Actions {
     pub(super) browse_clicked: bool,
     pub(super) process_clicked: bool,
+    pub(super) open_in_solidworks: Option<String>,
+    pub(super) show_properties: Option<String>,
     pub(super) export_clicked: bool,
     pub(super) export_dxf_clicked: bool,
     pub(super) path_changed: bool,
@@ -18,7 +20,7 @@ pub(super) struct Actions {
 pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> Actions {
     let mut actions = Actions::default();
 
-    ui.heading("Liste a plat des composants");
+    ui.heading("Liste des composants");
     ui.label(
         "Les pièces, sous-assemblages et l'assemblage maître sont regroupés avec leurs quantités.",
     );
@@ -94,7 +96,13 @@ pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> 
                         ScrollArea::both()
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                show_tree_node(ui, tree, egui::Id::new(("assembly_tree", tab.id)));
+                                show_tree_node(
+                                    ui,
+                                    tree,
+                                    egui::Id::new(("assembly_tree", tab.id)),
+                                    is_processing,
+                                    &mut actions,
+                                );
                             });
                     }
                 } else if !tab.assembly_parts.is_empty() {
@@ -117,17 +125,44 @@ pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> 
                                             AssemblyItemKind::SheetMetal => "Tôlerie",
                                             AssemblyItemKind::Assembly => "Assemblage",
                                         };
-                                        ui.with_layout(
-                                            Layout::left_to_right(Align::Center),
-                                            |ui| {
-                                                show_kind_icon(ui, item.kind);
-                                                ui.label(label);
-                                            },
+                                        let type_response = ui
+                                            .with_layout(
+                                                Layout::left_to_right(Align::Center),
+                                                |ui| {
+                                                    show_kind_icon(ui, item.kind);
+                                                    ui.selectable_label(false, label)
+                                                },
+                                            )
+                                            .inner;
+                                        add_component_context_menu(
+                                            type_response,
+                                            &item.path,
+                                            is_processing,
+                                            &mut actions,
                                         );
 
-                                        ui.label(&item.name);
-                                        ui.label(&item.path);
-                                        ui.label(item.quantity.to_string());
+                                        let name_response = ui.selectable_label(false, &item.name);
+                                        add_component_context_menu(
+                                            name_response,
+                                            &item.path,
+                                            is_processing,
+                                            &mut actions,
+                                        );
+                                        let path_response = ui.selectable_label(false, &item.path);
+                                        add_component_context_menu(
+                                            path_response,
+                                            &item.path,
+                                            is_processing,
+                                            &mut actions,
+                                        );
+                                        let quantity_response =
+                                            ui.selectable_label(false, item.quantity.to_string());
+                                        add_component_context_menu(
+                                            quantity_response,
+                                            &item.path,
+                                            is_processing,
+                                            &mut actions,
+                                        );
                                         ui.end_row();
                                     }
                                 });
@@ -142,8 +177,14 @@ pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> 
     actions
 }
 
-/// Affiche récursivement un nœud de l'arborescence avec son icône de type.
-fn show_tree_node(ui: &mut egui::Ui, node: &AssemblyTreeNode, id: egui::Id) {
+/// Affiche récursivement un nœud de l'arborescence avec son icône et son menu contextuel.
+fn show_tree_node(
+    ui: &mut egui::Ui,
+    node: &AssemblyTreeNode,
+    id: egui::Id,
+    is_processing: bool,
+    actions: &mut Actions,
+) {
     let kind = match node.kind {
         AssemblyItemKind::Part => "Pièce",
         AssemblyItemKind::SheetMetal => "Tôlerie",
@@ -155,21 +196,49 @@ fn show_tree_node(ui: &mut egui::Ui, node: &AssemblyTreeNode, id: egui::Id) {
         ui.push_id(id, |ui| {
             ui.horizontal(|ui| {
                 show_kind_icon(ui, node.kind);
-                ui.label(label);
+                let response = ui.selectable_label(false, label);
+                add_component_context_menu(response, &node.path, is_processing, actions);
             });
         });
     } else {
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
             .show_header(ui, |ui| {
                 show_kind_icon(ui, node.kind);
-                ui.label(label);
+                let response = ui.selectable_label(false, label);
+                add_component_context_menu(response, &node.path, is_processing, actions);
             })
             .body(|ui| {
                 for (index, child) in node.children.iter().enumerate() {
-                    show_tree_node(ui, child, id.with(index));
+                    show_tree_node(ui, child, id.with(index), is_processing, actions);
                 }
             });
     }
+}
+
+/// Ajoute les commandes de la pièce ou de l'assemblage au menu contextuel d'une ligne.
+fn add_component_context_menu(
+    response: egui::Response,
+    file_path: &str,
+    is_processing: bool,
+    actions: &mut Actions,
+) {
+    let file_path = file_path.to_owned();
+    response.context_menu(|ui| {
+        if ui
+            .add_enabled(!is_processing, egui::Button::new("Ouvrir dans SolidWorks"))
+            .clicked()
+        {
+            actions.open_in_solidworks = Some(file_path.clone());
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(!is_processing, egui::Button::new("Afficher les propriétés"))
+            .clicked()
+        {
+            actions.show_properties = Some(file_path.clone());
+            ui.close_menu();
+        }
+    });
 }
 
 /// Dessine l'icône d'une pièce, d'une tôlerie ou d'un assemblage avec la couleur du thème.

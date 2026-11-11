@@ -97,6 +97,20 @@ impl SolidWorksApp {
         super::properties::update_file_properties(&self.dispatch, file_path, properties)
     }
 
+    /// Ouvre ou active un document SolidWorks et place sa fenêtre au premier plan.
+    ///
+    /// Le document reste ouvert après l'appel, même si l'instance SolidWorks a été lancée par
+    /// l'application.
+    ///
+    /// # Arguments
+    /// * `file_path` — chemin d'un fichier `.sldprt` ou `.sldasm`.
+    ///
+    /// # Errors
+    /// Renvoie une erreur si le document ne peut pas être ouvert ou activé.
+    pub fn open_file_and_activate(&self, file_path: &str) -> Result<()> {
+        super::properties::open_file_and_activate(&self.dispatch, file_path)
+    }
+
     /// Retourne l'arborescence d'un assemblage et les quantités totales aplaties.
     ///
     /// Les composants identiques sont regroupés sous leur parent direct. Le second élément du
