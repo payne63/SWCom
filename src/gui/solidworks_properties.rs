@@ -21,12 +21,17 @@ pub(super) fn show(ui: &mut egui::Ui, app: &mut PropertiesGui, is_processing: bo
 
     ui.horizontal(|ui| {
         ui.label("Fichier :");
-        actions.file_path_changed = ui
-            .add_enabled(
-                !is_processing,
-                TextEdit::singleline(&mut app.file_path).desired_width(f32::INFINITY),
-            )
-            .changed();
+        let path_response = ui.add_enabled(
+            !is_processing,
+            TextEdit::singleline(&mut app.file_path)
+                .desired_width(f32::INFINITY)
+                .hint_text("Déposez un .sldprt ou .sldasm"),
+        );
+        actions.file_path_changed = path_response.changed();
+        if let Some(path) = super::dropped_file_path(ui, &["sldprt", "sldasm"]) {
+            app.file_path = path.display().to_string();
+            actions.file_path_changed = true;
+        }
     });
 
     ui.separator();

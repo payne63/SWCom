@@ -1,6 +1,6 @@
 use std::thread;
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::mpsc::{self, Receiver, TryRecvError},
 };
 
@@ -522,6 +522,23 @@ fn run_solidworks_operation_with_shutdown<T>(
     }
 }
 
+/// Renvoie un fichier déposé dans la fenêtre si son extension est acceptée.
+///
+/// egui ne fournit pas toujours la position du pointeur pendant un dépôt natif; l'appelant
+/// n'invoque cette fonction que pour le champ de chemin de l'onglet actif.
+pub(super) fn dropped_file_path(ui: &egui::Ui, accepted_extensions: &[&str]) -> Option<PathBuf> {
+    ui.input(|input| {
+        input.raw.dropped_files.iter().find_map(|file| {
+            let path = file.path.as_ref()?;
+            let extension = Path::new(path).extension()?.to_str()?;
+            accepted_extensions
+                .iter()
+                .any(|accepted| extension.eq_ignore_ascii_case(accepted))
+                .then(|| path.clone())
+        })
+    })
+}
+
 /// Décode l'image PNG intégrée et la charge une fois comme texture egui.
 fn load_home_texture(context: &egui::Context) -> egui::TextureHandle {
     let image = image::load_from_memory(include_bytes!("../images/evolution.png"))
@@ -694,7 +711,10 @@ impl eframe::App for PropertiesGui {
                     ui.vertical_centered(|ui| {
                         ui.heading(egui::RichText::new(title).italics().size(40.0));
                         ui.add_space(spacing);
-                        ui.add(egui::Image::new((texture.id(), displayed_image_size)).corner_radius(egui::CornerRadius::same(10)));
+                        ui.add(
+                            egui::Image::new((texture.id(), displayed_image_size))
+                                .corner_radius(egui::CornerRadius::same(10)),
+                        );
                         ui.add_space(spacing);
                         ui.label(subtitle);
                         ui.add_space(spacing);

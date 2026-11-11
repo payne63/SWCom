@@ -7,7 +7,9 @@ mod solidworks;
 /// Lance la fenêtre native de l'application.
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default().with_inner_size([760.0, 540.0]),
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([760.0, 540.0])
+            .with_drag_and_drop(true),
         ..Default::default()
     };
 

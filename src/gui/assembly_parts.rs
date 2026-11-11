@@ -28,12 +28,17 @@ pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> 
 
     ui.horizontal(|ui| {
         ui.label("Assemblage :");
-        actions.path_changed = ui
-            .add_enabled(
-                !is_processing,
-                TextEdit::singleline(&mut tab.assembly_file_path).desired_width(f32::INFINITY),
-            )
-            .changed();
+        let path_response = ui.add_enabled(
+            !is_processing,
+            TextEdit::singleline(&mut tab.assembly_file_path)
+                .desired_width(f32::INFINITY)
+                .hint_text("Déposez un .sldasm"),
+        );
+        actions.path_changed = path_response.changed();
+        if let Some(path) = super::dropped_file_path(ui, &["sldasm"]) {
+            tab.assembly_file_path = path.display().to_string();
+            actions.path_changed = true;
+        }
     });
 
     ui.separator();
