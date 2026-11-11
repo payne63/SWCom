@@ -79,6 +79,7 @@ pub struct CustomProperty {
 pub(super) fn get_assembly_components(
     sw_app: &IDispatch,
     file_path: &str,
+    include_thumbnails: bool,
 ) -> Result<Vec<AssemblyItem>> {
     if document_type(file_path)? != 2 {
         return Err(Error::new(
@@ -88,7 +89,7 @@ pub(super) fn get_assembly_components(
     }
 
     let (document, opened_by_this_call) = open_or_reuse_document(sw_app, file_path, 2, 3)?;
-    let parts_result = read_assembly_components(sw_app, &document, file_path);
+    let parts_result = read_assembly_components(sw_app, &document, file_path, include_thumbnails);
     if !opened_by_this_call {
         return parts_result;
     }
@@ -379,6 +380,7 @@ fn read_assembly_components(
     sw_app: &IDispatch,
     document: &IDispatch,
     master_path: &str,
+    include_thumbnails: bool,
 ) -> Result<Vec<AssemblyItem>> {
     let mut arguments = [variant_bool(false)];
     let mut components_variant = invoke(
@@ -398,18 +400,25 @@ fn read_assembly_components(
         .and_then(|name| name.to_str())
         .unwrap_or(master_path)
         .to_owned();
-    let master_configuration = invoke(
-        document,
-        "GetActiveConfiguration",
-        DISPATCH_METHOD,
-        &mut [],
-        true,
-    )
-    .and_then(|configuration| dispatch_from_variant(&configuration))
-    .and_then(|configuration| invoke_string(&configuration, "Name", DISPATCH_PROPERTYGET, &mut []))
-    .unwrap_or_else(|_| "Default".to_owned());
-    let master_thumbnail = get_preview_thumbnail(sw_app, master_path, &master_configuration);
-    thumbnails_by_path.insert(master_path.to_lowercase(), master_thumbnail.clone());
+    let master_thumbnail = if include_thumbnails {
+        let master_configuration = invoke(
+            document,
+            "GetActiveConfiguration",
+            DISPATCH_METHOD,
+            &mut [],
+            true,
+        )
+        .and_then(|configuration| dispatch_from_variant(&configuration))
+        .and_then(|configuration| {
+            invoke_string(&configuration, "Name", DISPATCH_PROPERTYGET, &mut [])
+        })
+        .unwrap_or_else(|_| "Default".to_owned());
+        let thumbnail = get_preview_thumbnail(sw_app, master_path, &master_configuration);
+        thumbnails_by_path.insert(master_path.to_lowercase(), thumbnail.clone());
+        thumbnail
+    } else {
+        None
+    };
     totals.insert(
         master_path.to_lowercase(),
         AssemblyItem {
@@ -456,18 +465,22 @@ fn read_assembly_components(
             .and_then(|name| name.to_str())
             .unwrap_or(&path)
             .to_owned();
-        let thumbnail = thumbnails_by_path.get(&key).cloned().unwrap_or_else(|| {
-            let configuration = invoke_string(
-                &component,
-                "ReferencedConfiguration",
-                DISPATCH_PROPERTYGET,
-                &mut [],
-            )
-            .unwrap_or_else(|_| "Default".to_owned());
-            let thumbnail = get_preview_thumbnail(sw_app, &path, &configuration);
-            thumbnails_by_path.insert(key.clone(), thumbnail.clone());
-            thumbnail
-        });
+        let thumbnail = if include_thumbnails {
+            thumbnails_by_path.get(&key).cloned().unwrap_or_else(|| {
+                let configuration = invoke_string(
+                    &component,
+                    "ReferencedConfiguration",
+                    DISPATCH_PROPERTYGET,
+                    &mut [],
+                )
+                .unwrap_or_else(|_| "Default".to_owned());
+                let thumbnail = get_preview_thumbnail(sw_app, &path, &configuration);
+                thumbnails_by_path.insert(key.clone(), thumbnail.clone());
+                thumbnail
+            })
+        } else {
+            None
+        };
         let entry = totals.entry(key).or_insert(AssemblyItem {
             kind,
             name,

@@ -12,6 +12,7 @@ use super::AppTab;
 pub(super) struct Actions {
     pub(super) browse_clicked: bool,
     pub(super) process_clicked: bool,
+    pub(super) process_without_thumbnails_clicked: bool,
     pub(super) export_clicked: bool,
     pub(super) export_dxf_clicked: bool,
     pub(super) path_changed: bool,
@@ -43,7 +44,7 @@ pub(super) fn show(
             .changed();
     });
 
-    ui.horizontal(|ui| {
+    ui.horizontal_wrapped(|ui| {
         actions.browse_clicked = ui
             .add_enabled(!is_processing, egui::Button::new("Parcourir…"))
             .clicked();
@@ -52,6 +53,13 @@ pub(super) fn show(
                 !is_processing && !tab.assembly_file_path.trim().is_empty(),
                 egui::Button::new("Afficher les composants"),
             )
+            .clicked();
+        actions.process_without_thumbnails_clicked = ui
+            .add_enabled(
+                !is_processing && !tab.assembly_file_path.trim().is_empty(),
+                egui::Button::new("Afficher sans miniatures"),
+            )
+            .on_hover_text("Charge la liste sans récupérer les aperçus des composants.")
             .clicked();
         actions.export_clicked = ui
             .add_enabled(

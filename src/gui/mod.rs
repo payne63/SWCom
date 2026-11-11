@@ -180,7 +180,12 @@ impl PropertiesGui {
     }
 
     /// Lance la lecture aplatie des pièces d'un onglet d'assemblage.
-    fn process_assembly_tab(&mut self, tab_id: u64, context: &egui::Context) {
+    fn process_assembly_tab(
+        &mut self,
+        tab_id: u64,
+        context: &egui::Context,
+        include_thumbnails: bool,
+    ) {
         if self.is_processing {
             return;
         }
@@ -199,7 +204,7 @@ impl PropertiesGui {
         tab.assembly_loaded = false;
         tab.assembly_status = None;
         self.start_worker(tab_id, context, move || {
-            let components = read_assembly_components_on_worker(&file_path)?;
+            let components = read_assembly_components_on_worker(&file_path, include_thumbnails)?;
             Ok(WorkerOutcome::AssemblyComponentsLoaded(
                 file_path, components,
             ))
@@ -408,8 +413,15 @@ fn update_properties_on_worker(
 /// Initialise COM et lit les composants et quantités sur le thread de travail.
 fn read_assembly_components_on_worker(
     file_path: &str,
+    include_thumbnails: bool,
 ) -> std::result::Result<Vec<AssemblyItem>, String> {
-    run_solidworks_operation(|sw_app| sw_app.get_assembly_components(file_path))
+    run_solidworks_operation(|sw_app| {
+        if include_thumbnails {
+            sw_app.get_assembly_components(file_path)
+        } else {
+            sw_app.get_assembly_components_without_thumbnails(file_path)
+        }
+    })
 }
 
 /// Initialise COM puis exporte les mises à plat sur le thread de travail.
@@ -567,7 +579,10 @@ impl eframe::App for PropertiesGui {
                         assembly_browse_tab_id = Some(tab.id);
                     }
                     if actions.process_clicked {
-                        assembly_process_tab_id = Some(tab.id);
+                        assembly_process_tab_id = Some((tab.id, true));
+                    }
+                    if actions.process_without_thumbnails_clicked {
+                        assembly_process_tab_id = Some((tab.id, false));
                     }
                     if actions.export_clicked {
                         assembly_export_tab_id = Some(tab.id);
@@ -647,8 +662,8 @@ impl eframe::App for PropertiesGui {
             self.process_file(context);
         } else if update_clicked {
             self.update_file(context);
-        } else if let Some(tab_id) = assembly_process_tab_id {
-            self.process_assembly_tab(tab_id, context);
+        } else if let Some((tab_id, include_thumbnails)) = assembly_process_tab_id {
+            self.process_assembly_tab(tab_id, context, include_thumbnails);
         }
     }
 }
