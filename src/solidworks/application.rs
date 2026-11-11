@@ -7,7 +7,7 @@ use windows::Win32::System::Ole::GetActiveObject;
 
 use super::{
     dispatch,
-    properties::{AssemblyItem, CustomProperty},
+    properties::{AssemblyItem, AssemblyTreeNode, CustomProperty},
 };
 
 /// Représente l'initialisation COM sur le thread courant.
@@ -122,6 +122,23 @@ impl SolidWorksApp {
         file_path: &str,
     ) -> Result<Vec<AssemblyItem>> {
         super::properties::get_assembly_components(&self.dispatch, file_path, false)
+    }
+
+    /// Retourne l'arborescence d'un assemblage et les quantités totales aplaties.
+    ///
+    /// Les composants identiques sont regroupés sous leur parent direct. Le second élément du
+    /// tuple conserve la liste aplatie nécessaire aux exports de nomenclature.
+    ///
+    /// # Arguments
+    /// * `file_path` — chemin d'un fichier `.sldasm`.
+    ///
+    /// # Errors
+    /// Renvoie une erreur si le document n'est pas un assemblage ou si un appel SolidWorks échoue.
+    pub fn get_assembly_tree(
+        &self,
+        file_path: &str,
+    ) -> Result<(AssemblyTreeNode, Vec<AssemblyItem>)> {
+        super::properties::get_assembly_tree(&self.dispatch, file_path)
     }
 
     /// Exporte les mises à plat DXF des pièces de tôlerie vers `dxf auto` à côté de l'assemblage.

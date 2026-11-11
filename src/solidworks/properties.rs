@@ -54,6 +54,21 @@ pub enum AssemblyItemKind {
     Assembly,
 }
 
+/// Nœud hiérarchique d'un assemblage, avec ses enfants regroupés par chemin de fichier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssemblyTreeNode {
+    /// Catégorie du document référencé.
+    pub kind: AssemblyItemKind,
+    /// Nom du fichier du composant.
+    pub name: String,
+    /// Chemin complet du document référencé.
+    pub path: String,
+    /// Nombre d'occurrences directes sous le parent.
+    pub quantity: usize,
+    /// Enfants directs de l'assemblage, ou liste vide pour une pièce.
+    pub children: Vec<AssemblyTreeNode>,
+}
+
 /// Une propriété personnalisée lue dans un document SolidWorks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CustomProperty {
@@ -98,6 +113,38 @@ pub(super) fn get_assembly_components(
     parts_result.and_then(|parts| {
         close_result?;
         Ok(parts)
+    })
+}
+
+/// Lit un assemblage en arbre et retourne également sa liste aplatie pour les exports.
+///
+/// Les composants de même chemin sont regroupés au sein de leur assemblage parent, avec leur
+/// quantité directe. Les quantités aplaties tiennent compte du nombre d'occurrences des
+/// sous-assemblages.
+///
+/// # Errors
+/// Renvoie une erreur si le chemin ne désigne pas un assemblage ou si un appel COM échoue.
+pub(super) fn get_assembly_tree(
+    sw_app: &IDispatch,
+    file_path: &str,
+) -> Result<(AssemblyTreeNode, Vec<AssemblyItem>)> {
+    if document_type(file_path)? != 2 {
+        return Err(Error::new(
+            HRESULT(0x80070057_u32 as i32),
+            "L'arborescence nécessite un fichier .sldasm".into(),
+        ));
+    }
+
+    let (document, opened_by_this_call) = open_or_reuse_document(sw_app, file_path, 2, 3)?;
+    let tree_result = read_assembly_tree(sw_app, &document, file_path);
+    if !opened_by_this_call {
+        return tree_result;
+    }
+
+    let close_result = close_document(sw_app, &document, file_path);
+    tree_result.and_then(|tree| {
+        close_result?;
+        Ok(tree)
     })
 }
 
@@ -502,6 +549,160 @@ fn read_assembly_components(
     Ok(items)
 }
 
+/// Construit l'arbre des composants directs puis calcule en parallèle leurs quantités aplaties.
+fn read_assembly_tree(
+    sw_app: &IDispatch,
+    document: &IDispatch,
+    master_path: &str,
+) -> Result<(AssemblyTreeNode, Vec<AssemblyItem>)> {
+    let mut arguments = [variant_bool(true)];
+    let mut components_variant = invoke(
+        document,
+        "GetComponents",
+        DISPATCH_METHOD,
+        &mut arguments,
+        true,
+    )?;
+    let components = dispatch_array_from_variant(&mut components_variant)?;
+
+    let mut ancestors = HashSet::new();
+    ancestors.insert(master_path.to_lowercase());
+    let children = read_tree_children(sw_app, components, &mut ancestors)?;
+    let root = AssemblyTreeNode {
+        kind: AssemblyItemKind::Assembly,
+        name: Path::new(master_path)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or(master_path)
+            .to_owned(),
+        path: master_path.to_owned(),
+        quantity: 1,
+        children,
+    };
+
+    let mut totals = HashMap::new();
+    accumulate_tree_quantities(&root, 1, &mut totals);
+    let mut items: Vec<AssemblyItem> = totals.into_values().collect();
+    items.sort_by(|left, right| {
+        left.name
+            .to_lowercase()
+            .cmp(&right.name.to_lowercase())
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.path.to_lowercase().cmp(&right.path.to_lowercase()))
+    });
+
+    Ok((root, items))
+}
+
+/// Regroupe les composants directs d'un même assemblage et descend récursivement dans ses enfants.
+fn read_tree_children(
+    sw_app: &IDispatch,
+    components: Vec<IDispatch>,
+    ancestors: &mut HashSet<String>,
+) -> Result<Vec<AssemblyTreeNode>> {
+    let mut grouped: HashMap<String, (IDispatch, String, AssemblyItemKind, usize)> = HashMap::new();
+    let mut sheet_metal_by_path = HashMap::new();
+
+    for component in components {
+        let suppression = invoke(&component, "GetSuppression", DISPATCH_METHOD, &mut [], true)?;
+        if i32_from_variant(&suppression)? == 0 {
+            continue;
+        }
+
+        let Ok(path) = invoke_string(&component, "GetPathName", DISPATCH_METHOD, &mut []) else {
+            continue;
+        };
+        let key = path.to_lowercase();
+        let kind = match Path::new(&path)
+            .extension()
+            .and_then(|extension| extension.to_str())
+        {
+            Some(extension) if extension.eq_ignore_ascii_case("sldprt") => {
+                let is_sheet_metal = *sheet_metal_by_path
+                    .entry(key.clone())
+                    .or_insert_with(|| component_is_sheet_metal(&component));
+                if is_sheet_metal {
+                    AssemblyItemKind::SheetMetal
+                } else {
+                    AssemblyItemKind::Part
+                }
+            }
+            Some(extension) if extension.eq_ignore_ascii_case("sldasm") => {
+                AssemblyItemKind::Assembly
+            }
+            _ => continue,
+        };
+
+        if let Some((_, _, _, quantity)) = grouped.get_mut(&key) {
+            *quantity += 1;
+        } else {
+            grouped.insert(key, (component, path, kind, 1));
+        }
+    }
+
+    let mut grouped: Vec<_> = grouped.into_values().collect();
+    grouped.sort_by(|left, right| {
+        left.1
+            .to_lowercase()
+            .cmp(&right.1.to_lowercase())
+            .then_with(|| left.2.cmp(&right.2))
+    });
+
+    grouped
+        .into_iter()
+        .map(|(component, path, kind, quantity)| {
+            let key = path.to_lowercase();
+            let children = if kind == AssemblyItemKind::Assembly && ancestors.insert(key.clone()) {
+                let children_result = (|| {
+                    let mut children_variant =
+                        invoke(&component, "GetChildren", DISPATCH_METHOD, &mut [], true)?;
+                    let children = dispatch_array_from_variant(&mut children_variant)?;
+                    read_tree_children(sw_app, children, ancestors)
+                })();
+                ancestors.remove(&key);
+                children_result?
+            } else {
+                Vec::new()
+            };
+            let name = Path::new(&path)
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&path)
+                .to_owned();
+
+            Ok(AssemblyTreeNode {
+                kind,
+                name,
+                path,
+                quantity,
+                children,
+            })
+        })
+        .collect()
+}
+
+/// Ajoute les occurrences de chaque nœud à la liste aplatie, en tenant compte des quantités parentes.
+fn accumulate_tree_quantities(
+    node: &AssemblyTreeNode,
+    parent_quantity: usize,
+    totals: &mut HashMap<String, AssemblyItem>,
+) {
+    let total_quantity = parent_quantity.saturating_mul(node.quantity);
+    let key = node.path.to_lowercase();
+    let item = totals.entry(key).or_insert_with(|| AssemblyItem {
+        kind: node.kind,
+        name: node.name.clone(),
+        path: node.path.clone(),
+        quantity: 0,
+        thumbnail: None,
+    });
+    item.quantity = item.quantity.saturating_add(total_quantity);
+
+    for child in &node.children {
+        accumulate_tree_quantities(child, total_quantity, totals);
+    }
+}
+
 /// Récupère l'aperçu enregistré du document SolidWorks dans un BMP temporaire.
 ///
 /// L'absence d'aperçu n'interrompt pas la lecture de la liste d'assemblage.
@@ -817,7 +1018,41 @@ fn active_configuration_property_manager(document: &IDispatch) -> Result<IDispat
 
 #[cfg(test)]
 mod tests {
-    use super::parse_bmp_thumbnail;
+    use std::collections::HashMap;
+
+    use super::{
+        accumulate_tree_quantities, parse_bmp_thumbnail, AssemblyItemKind, AssemblyTreeNode,
+    };
+
+    #[test]
+    fn flattens_tree_quantities_through_repeated_subassemblies() {
+        let tree = AssemblyTreeNode {
+            kind: AssemblyItemKind::Assembly,
+            name: "master.sldasm".to_owned(),
+            path: "C:/master.sldasm".to_owned(),
+            quantity: 1,
+            children: vec![AssemblyTreeNode {
+                kind: AssemblyItemKind::Assembly,
+                name: "sub.sldasm".to_owned(),
+                path: "C:/sub.sldasm".to_owned(),
+                quantity: 2,
+                children: vec![AssemblyTreeNode {
+                    kind: AssemblyItemKind::Part,
+                    name: "part.sldprt".to_owned(),
+                    path: "C:/part.sldprt".to_owned(),
+                    quantity: 3,
+                    children: Vec::new(),
+                }],
+            }],
+        };
+        let mut totals = HashMap::new();
+
+        accumulate_tree_quantities(&tree, 1, &mut totals);
+
+        assert_eq!(totals["c:/master.sldasm"].quantity, 1);
+        assert_eq!(totals["c:/sub.sldasm"].quantity, 2);
+        assert_eq!(totals["c:/part.sldprt"].quantity, 6);
+    }
 
     #[test]
     fn decodes_bottom_up_24_bit_bmp_to_top_down_rgba() {

@@ -8,7 +8,9 @@ use std::{
 use egui::{Align, CentralPanel, Layout, ScrollArea, TopBottomPanel};
 use rfd::FileDialog;
 
-use crate::solidworks::{AssemblyItem, ComApartment, CustomProperty, SolidWorksApp};
+use crate::solidworks::{
+    AssemblyItem, AssemblyTreeNode, ComApartment, CustomProperty, SolidWorksApp,
+};
 
 mod assembly_parts;
 mod solidworks_properties;
@@ -30,6 +32,8 @@ struct AppTab {
     kind: TabKind,
     assembly_file_path: String,
     assembly_parts: Vec<AssemblyItem>,
+    assembly_tree: Option<AssemblyTreeNode>,
+    assembly_tree_view: bool,
     assembly_thumbnails: HashMap<String, egui::TextureHandle>,
     assembly_loaded: bool,
     assembly_status: Option<String>,
@@ -44,6 +48,8 @@ enum WorkerOutcome {
     PropertiesUpdated,
     /// Composants chargés pour le chemin d'assemblage indiqué.
     AssemblyComponentsLoaded(String, Vec<AssemblyItem>),
+    /// Arborescence et liste aplatie chargées pour le chemin indiqué.
+    AssemblyTreeLoaded(String, AssemblyTreeNode, Vec<AssemblyItem>),
     /// Mises à plat DXF exportées et éventuels échecs par pièce.
     SheetMetalDxfExported {
         output_directory: String,
@@ -81,6 +87,8 @@ impl PropertiesGui {
                     kind: TabKind::SolidWorksProperties,
                     assembly_file_path: String::new(),
                     assembly_parts: Vec::new(),
+                    assembly_tree: None,
+                    assembly_tree_view: false,
                     assembly_thumbnails: HashMap::new(),
                     assembly_loaded: false,
                     assembly_status: None,
@@ -92,6 +100,8 @@ impl PropertiesGui {
                     kind: TabKind::AssemblyParts,
                     assembly_file_path: String::new(),
                     assembly_parts: Vec::new(),
+                    assembly_tree: None,
+                    assembly_tree_view: false,
                     assembly_thumbnails: HashMap::new(),
                     assembly_loaded: false,
                     assembly_status: None,
@@ -200,6 +210,8 @@ impl PropertiesGui {
 
         let file_path = tab.assembly_file_path.clone();
         tab.assembly_parts.clear();
+        tab.assembly_tree = None;
+        tab.assembly_tree_view = false;
         tab.assembly_thumbnails.clear();
         tab.assembly_loaded = false;
         tab.assembly_status = None;
@@ -208,6 +220,33 @@ impl PropertiesGui {
             Ok(WorkerOutcome::AssemblyComponentsLoaded(
                 file_path, components,
             ))
+        });
+    }
+
+    /// Démarre la lecture hiérarchique des composants de l'assemblage.
+    fn process_assembly_tree_tab(&mut self, tab_id: u64, context: &egui::Context) {
+        if self.is_processing {
+            return;
+        }
+        let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) else {
+            return;
+        };
+        if tab.assembly_file_path.trim().is_empty() {
+            tab.assembly_status = Some("Sélectionnez un fichier .sldasm.".to_owned());
+            tab.assembly_status_is_error = true;
+            return;
+        }
+
+        let file_path = tab.assembly_file_path.clone();
+        tab.assembly_parts.clear();
+        tab.assembly_tree = None;
+        tab.assembly_tree_view = true;
+        tab.assembly_thumbnails.clear();
+        tab.assembly_loaded = false;
+        tab.assembly_status = None;
+        self.start_worker(tab_id, context, move || {
+            let (tree, parts) = read_assembly_tree_on_worker(&file_path)?;
+            Ok(WorkerOutcome::AssemblyTreeLoaded(file_path, tree, parts))
         });
     }
 
@@ -254,6 +293,8 @@ impl PropertiesGui {
         if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
             tab.assembly_file_path = path.display().to_string();
             tab.assembly_parts.clear();
+            tab.assembly_tree = None;
+            tab.assembly_tree_view = false;
             tab.assembly_thumbnails.clear();
             tab.assembly_loaded = false;
             tab.assembly_status = None;
@@ -348,7 +389,21 @@ impl PropertiesGui {
                     if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                         tab.assembly_file_path = file_path;
                         tab.assembly_parts = components;
+                        tab.assembly_tree = None;
+                        tab.assembly_tree_view = false;
                         tab.assembly_thumbnails = thumbnails;
+                        tab.assembly_loaded = true;
+                        tab.assembly_status = None;
+                        tab.assembly_status_is_error = false;
+                    }
+                }
+                Ok(WorkerOutcome::AssemblyTreeLoaded(file_path, tree, parts)) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        tab.assembly_file_path = file_path;
+                        tab.assembly_parts = parts;
+                        tab.assembly_tree = Some(tree);
+                        tab.assembly_tree_view = true;
+                        tab.assembly_thumbnails.clear();
                         tab.assembly_loaded = true;
                         tab.assembly_status = None;
                         tab.assembly_status_is_error = false;
@@ -422,6 +477,13 @@ fn read_assembly_components_on_worker(
             sw_app.get_assembly_components_without_thumbnails(file_path)
         }
     })
+}
+
+/// Initialise COM et lit l'arbre et la liste aplatie sur le thread de travail.
+fn read_assembly_tree_on_worker(
+    file_path: &str,
+) -> std::result::Result<(AssemblyTreeNode, Vec<AssemblyItem>), String> {
+    run_solidworks_operation(|sw_app| sw_app.get_assembly_tree(file_path))
 }
 
 /// Initialise COM puis exporte les mises à plat sur le thread de travail.
@@ -510,6 +572,7 @@ impl eframe::App for PropertiesGui {
         let mut selected_tab_id = None;
         let mut assembly_browse_tab_id = None;
         let mut assembly_process_tab_id = None;
+        let mut assembly_tree_process_tab_id = None;
         let mut assembly_export_tab_id = None;
         let mut assembly_dxf_export_tab_id = None;
         let mut assembly_path_changed_tab_id = None;
@@ -644,6 +707,9 @@ impl eframe::App for PropertiesGui {
                     if actions.process_without_thumbnails_clicked {
                         assembly_process_tab_id = Some((tab.id, false));
                     }
+                    if actions.process_tree_clicked {
+                        assembly_tree_process_tab_id = Some(tab.id);
+                    }
                     if actions.export_clicked {
                         assembly_export_tab_id = Some(tab.id);
                     }
@@ -681,6 +747,8 @@ impl eframe::App for PropertiesGui {
         if let Some(tab_id) = assembly_path_changed_tab_id {
             if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                 tab.assembly_parts.clear();
+                tab.assembly_tree = None;
+                tab.assembly_tree_view = false;
                 tab.assembly_thumbnails.clear();
                 tab.assembly_loaded = false;
                 tab.assembly_status = None;
@@ -717,6 +785,9 @@ impl eframe::App for PropertiesGui {
                     }
                 }
             }
+        }
+        if let Some(tab_id) = assembly_tree_process_tab_id {
+            self.process_assembly_tree_tab(tab_id, context);
         }
         if let Some(tab_id) = assembly_dxf_export_tab_id {
             self.export_assembly_sheet_metal(tab_id, context);

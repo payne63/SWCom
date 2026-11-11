@@ -1,6 +1,6 @@
 use egui::{Align, Grid, Layout, ScrollArea, TextEdit};
 
-use crate::solidworks::AssemblyItemKind;
+use crate::solidworks::{AssemblyItemKind, AssemblyTreeNode};
 
 use super::AppTab;
 
@@ -10,6 +10,7 @@ pub(super) struct Actions {
     pub(super) browse_clicked: bool,
     pub(super) process_clicked: bool,
     pub(super) process_without_thumbnails_clicked: bool,
+    pub(super) process_tree_clicked: bool,
     pub(super) export_clicked: bool,
     pub(super) export_dxf_clicked: bool,
     pub(super) path_changed: bool,
@@ -71,6 +72,12 @@ pub(super) fn show(
                     )
                     .on_hover_text("Charge la liste sans récupérer les aperçus des composants.")
                     .clicked();
+                actions.process_tree_clicked = ui
+                    .add_enabled(
+                        !is_processing && !tab.assembly_file_path.trim().is_empty(),
+                        egui::Button::new("Afficher les composants en arbre").min_size(button_size),
+                    )
+                    .clicked();
                 actions.export_clicked = ui
                     .add_enabled(
                         !is_processing && tab.assembly_loaded,
@@ -93,7 +100,15 @@ pub(super) fn show(
             Layout::top_down(Align::Min),
             |ui| {
                 ui.set_width(list_width);
-                if !tab.assembly_parts.is_empty() {
+                if tab.assembly_tree_view {
+                    if let Some(tree) = &tab.assembly_tree {
+                        ScrollArea::both()
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                show_tree_node(ui, tree, egui::Id::new(("assembly_tree", tab.id)));
+                            });
+                    }
+                } else if !tab.assembly_parts.is_empty() {
                     ScrollArea::both()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
@@ -231,4 +246,29 @@ pub(super) fn show(
     });
 
     (actions, hovered_thumbnail)
+}
+
+/// Affiche récursivement un nœud de l'arborescence et ses composants enfants.
+fn show_tree_node(ui: &mut egui::Ui, node: &AssemblyTreeNode, id: egui::Id) {
+    let kind = match node.kind {
+        AssemblyItemKind::Part => "Pièce",
+        AssemblyItemKind::SheetMetal => "Tôlerie",
+        AssemblyItemKind::Assembly => "Assemblage",
+    };
+    let label = format!("{kind} — {} (Qté : {})", node.name, node.quantity);
+
+    if node.children.is_empty() {
+        ui.push_id(id, |ui| {
+            ui.label(label);
+        });
+    } else {
+        egui::CollapsingHeader::new(label)
+            .id_salt(id)
+            .default_open(true)
+            .show(ui, |ui| {
+                for (index, child) in node.children.iter().enumerate() {
+                    show_tree_node(ui, child, id.with(index));
+                }
+            });
+    }
 }
