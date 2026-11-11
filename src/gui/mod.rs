@@ -558,7 +558,43 @@ impl eframe::App for PropertiesGui {
         let active_tab_kind = active_tab.map_or(TabKind::SolidWorksProperties, |tab| tab.kind);
 
         let is_processing = self.is_processing;
-        let processing_tab_id = self.processing_tab_id;
+        if matches!(active_tab_kind, TabKind::AssemblyParts) {
+            let active_tab_id = self.active_tab_id;
+            let processing_active_tab =
+                is_processing && self.processing_tab_id == Some(active_tab_id);
+            let processing_other_tab =
+                is_processing && self.processing_tab_id != Some(active_tab_id);
+            let status = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == active_tab_id)
+                .and_then(|tab| {
+                    tab.assembly_status
+                        .clone()
+                        .map(|status| (status, tab.assembly_status_is_error))
+                });
+
+            TopBottomPanel::bottom("assembly_operation_status")
+                .exact_height(30.0)
+                .show(context, |ui| {
+                    ui.with_layout(Layout::left_to_right(Align::Center), |ui| {
+                        if processing_active_tab {
+                            ui.spinner();
+                            ui.label("Opération SolidWorks en cours…");
+                        } else if processing_other_tab {
+                            ui.label("Une autre opération est en cours…");
+                        } else if let Some((status, is_error)) = &status {
+                            let color = if *is_error {
+                                egui::Color32::LIGHT_RED
+                            } else {
+                                egui::Color32::LIGHT_GREEN
+                            };
+                            ui.colored_label(color, status);
+                        }
+                    });
+                });
+        }
+
         CentralPanel::default().show(context, |ui| match active_tab_kind {
             TabKind::SolidWorksProperties => {
                 let actions = solidworks_properties::show(ui, self, is_processing);
@@ -573,8 +609,7 @@ impl eframe::App for PropertiesGui {
                     .iter_mut()
                     .find(|tab| tab.id == self.active_tab_id)
                 {
-                    let (actions, preview) =
-                        assembly_parts::show(ui, tab, is_processing, processing_tab_id);
+                    let (actions, preview) = assembly_parts::show(ui, tab, is_processing);
                     if actions.browse_clicked {
                         assembly_browse_tab_id = Some(tab.id);
                     }
