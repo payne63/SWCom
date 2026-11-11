@@ -694,11 +694,12 @@ impl eframe::App for PropertiesGui {
                     ui.vertical_centered(|ui| {
                         ui.heading(egui::RichText::new(title).italics().size(40.0));
                         ui.add_space(spacing);
-                        ui.image((texture.id(), displayed_image_size));
+                        ui.add(egui::Image::new((texture.id(), displayed_image_size)).corner_radius(egui::CornerRadius::same(10)));
                         ui.add_space(spacing);
                         ui.label(subtitle);
                         ui.add_space(spacing);
                         ui.label(joke);
+                        ui.hyperlink_to("github link", "https://github.com/payne63/SWCom");
                     });
                 }
             }
