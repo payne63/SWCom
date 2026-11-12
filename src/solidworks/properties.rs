@@ -11,9 +11,9 @@ use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, S
 
 use super::dispatch::{
     bool_from_variant, byref_bool, byref_bstr, byref_i32, dispatch_array_from_variant,
-    dispatch_from_variant, i32_from_variant, i64_from_variant, invoke, invoke_string,
-    optional_dispatch_from_variant, string_array_from_variant, variant_bool, variant_bstr,
-    variant_i32,
+    dispatch_from_variant, f64_from_variant, i32_from_variant, i64_from_variant, invoke,
+    invoke_string, optional_dispatch_from_variant, string_array_from_variant, variant_bool,
+    variant_bstr, variant_i32,
 };
 
 /// Un composant référencé par un assemblage et son nombre total d'occurrences.
@@ -25,6 +25,8 @@ pub struct AssemblyItem {
     pub name: String,
     /// Chemin du fichier référencé par l'assemblage.
     pub path: String,
+    /// Épaisseur nominale de la tôlerie en millimètres, arrondie à l'entier le plus proche.
+    pub thickness: Option<u8>,
     /// Nombre total d'occurrences dans l'assemblage.
     pub quantity: usize,
 }
@@ -49,6 +51,8 @@ pub struct AssemblyTreeNode {
     pub name: String,
     /// Chemin complet du document référencé.
     pub path: String,
+    /// Épaisseur nominale de la tôlerie en millimètres, arrondie à l'entier le plus proche.
+    pub thickness: Option<u8>,
     /// Nombre d'occurrences directes sous le parent.
     pub quantity: usize,
     /// Enfants directs de l'assemblage, ou liste vide pour une pièce.
@@ -434,6 +438,7 @@ fn read_assembly_tree(
             .unwrap_or(master_path)
             .to_owned(),
         path: master_path.to_owned(),
+        thickness: None,
         quantity: 1,
         children,
     };
@@ -458,7 +463,8 @@ fn read_tree_children(
     components: Vec<IDispatch>,
     ancestors: &mut HashSet<String>,
 ) -> Result<Vec<AssemblyTreeNode>> {
-    let mut grouped: HashMap<String, (IDispatch, String, AssemblyItemKind, usize)> = HashMap::new();
+    let mut grouped: HashMap<String, (IDispatch, String, AssemblyItemKind, Option<u8>, usize)> =
+        HashMap::new();
     let mut sheet_metal_by_path = HashMap::new();
 
     for component in components {
@@ -476,9 +482,9 @@ fn read_tree_children(
             .and_then(|extension| extension.to_str())
         {
             Some(extension) if extension.eq_ignore_ascii_case("sldprt") => {
-                let is_sheet_metal = *sheet_metal_by_path
+                let (is_sheet_metal, _) = *sheet_metal_by_path
                     .entry(key.clone())
-                    .or_insert_with(|| component_is_sheet_metal(&component));
+                    .or_insert_with(|| component_sheet_metal_info(&component));
                 if is_sheet_metal {
                     AssemblyItemKind::SheetMetal
                 } else {
@@ -491,10 +497,18 @@ fn read_tree_children(
             _ => continue,
         };
 
-        if let Some((_, _, _, quantity)) = grouped.get_mut(&key) {
+        let thickness = if kind == AssemblyItemKind::SheetMetal {
+            sheet_metal_by_path
+                .get(&key)
+                .and_then(|(_, thickness)| *thickness)
+        } else {
+            None
+        };
+
+        if let Some((_, _, _, _, quantity)) = grouped.get_mut(&key) {
             *quantity += 1;
         } else {
-            grouped.insert(key, (component, path, kind, 1));
+            grouped.insert(key, (component, path, kind, thickness, 1));
         }
     }
 
@@ -508,7 +522,7 @@ fn read_tree_children(
 
     grouped
         .into_iter()
-        .map(|(component, path, kind, quantity)| {
+        .map(|(component, path, kind, thickness, quantity)| {
             let key = path.to_lowercase();
             let children = if kind == AssemblyItemKind::Assembly && ancestors.insert(key.clone()) {
                 let children_result = (|| {
@@ -532,6 +546,7 @@ fn read_tree_children(
                 kind,
                 name,
                 path,
+                thickness,
                 quantity,
                 children,
             })
@@ -551,6 +566,7 @@ fn accumulate_tree_quantities(
         kind: node.kind,
         name: node.name.clone(),
         path: node.path.clone(),
+        thickness: node.thickness,
         quantity: 0,
     });
     item.quantity = item.quantity.saturating_add(total_quantity);
@@ -560,11 +576,11 @@ fn accumulate_tree_quantities(
     }
 }
 
-/// Indique si un composant contient au moins un corps solide de tôlerie.
+/// Détermine si un composant contient de la tôlerie et lit son épaisseur nominale.
 ///
 /// Une erreur d'accès aux corps est traitée comme une absence de tôlerie afin de ne pas
 /// interrompre l'extraction de la liste des composants.
-fn component_is_sheet_metal(component: &IDispatch) -> bool {
+fn component_sheet_metal_info(component: &IDispatch) -> (bool, Option<u8>) {
     let mut arguments = [variant_i32(0)]; // swSolidBody
     let Ok(mut bodies_variant) = invoke(
         component,
@@ -573,17 +589,70 @@ fn component_is_sheet_metal(component: &IDispatch) -> bool {
         &mut arguments,
         true,
     ) else {
-        return false;
+        return (false, None);
     };
     let Ok(bodies) = dispatch_array_from_variant(&mut bodies_variant) else {
-        return false;
+        return (false, None);
     };
 
-    bodies.into_iter().any(|body| {
+    let is_sheet_metal = bodies.into_iter().any(|body| {
         invoke(&body, "IsSheetMetal", DISPATCH_METHOD, &mut [], true)
             .and_then(|result| bool_from_variant(&result))
             .unwrap_or(false)
-    })
+    });
+
+    if is_sheet_metal {
+        (true, component_sheet_metal_thickness(component))
+    } else {
+        (false, None)
+    }
+}
+
+/// Lit l'épaisseur en parcourant les définitions des fonctions de tôlerie du document.
+///
+/// SolidWorks fournit cette valeur en mètres. Elle est convertie en millimètres et arrondie à
+/// l'entier le plus proche pour correspondre au type `Option<u8>` de la nomenclature.
+fn component_sheet_metal_thickness(component: &IDispatch) -> Option<u8> {
+    let document_variant =
+        invoke(component, "GetModelDoc2", DISPATCH_METHOD, &mut [], true).ok()?;
+    let document = optional_dispatch_from_variant(&document_variant)?;
+    let mut feature_variant =
+        invoke(&document, "FirstFeature", DISPATCH_METHOD, &mut [], true).ok()?;
+    let mut feature = optional_dispatch_from_variant(&feature_variant)?;
+
+    loop {
+        let feature_type = invoke_string(&feature, "GetTypeName2", DISPATCH_METHOD, &mut []).ok();
+        if feature_type.as_deref().is_some_and(|feature_type| {
+            matches!(feature_type, "SheetMetal" | "SMBaseFlange" | "BaseFlange")
+        }) {
+            if let Ok(definition_variant) =
+                invoke(&feature, "GetDefinition", DISPATCH_METHOD, &mut [], true)
+            {
+                if let Some(definition) = optional_dispatch_from_variant(&definition_variant) {
+                    if let Ok(thickness_variant) = invoke(
+                        &definition,
+                        "Thickness",
+                        DISPATCH_PROPERTYGET,
+                        &mut [],
+                        true,
+                    ) {
+                        if let Ok(thickness_meters) = f64_from_variant(&thickness_variant) {
+                            let thickness_mm = (thickness_meters * 1000.0).round();
+                            if thickness_mm.is_finite()
+                                && (1.0..=u8::MAX as f64).contains(&thickness_mm)
+                            {
+                                return Some(thickness_mm as u8);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        feature_variant =
+            invoke(&feature, "GetNextFeature", DISPATCH_METHOD, &mut [], true).ok()?;
+        feature = optional_dispatch_from_variant(&feature_variant)?;
+    }
 }
 
 /// Lit les propriétés personnalisées générales d'un document `ModelDoc2`.
@@ -778,16 +847,19 @@ mod tests {
             kind: AssemblyItemKind::Assembly,
             name: "master.sldasm".to_owned(),
             path: "C:/master.sldasm".to_owned(),
+            thickness: None,
             quantity: 1,
             children: vec![AssemblyTreeNode {
                 kind: AssemblyItemKind::Assembly,
                 name: "sub.sldasm".to_owned(),
                 path: "C:/sub.sldasm".to_owned(),
+                thickness: None,
                 quantity: 2,
                 children: vec![AssemblyTreeNode {
                     kind: AssemblyItemKind::Part,
                     name: "part.sldprt".to_owned(),
                     path: "C:/part.sldprt".to_owned(),
+                    thickness: Some(2),
                     quantity: 3,
                     children: Vec::new(),
                 }],
@@ -800,5 +872,6 @@ mod tests {
         assert_eq!(totals["c:/master.sldasm"].quantity, 1);
         assert_eq!(totals["c:/sub.sldasm"].quantity, 2);
         assert_eq!(totals["c:/part.sldprt"].quantity, 6);
+        assert_eq!(totals["c:/part.sldprt"].thickness, Some(2));
     }
 }

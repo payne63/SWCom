@@ -116,11 +116,12 @@ pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> 
                         .show(ui, |ui| {
                             Grid::new(("assembly_parts", tab.id))
                                 .striped(true)
-                                .num_columns(4)
+                                .num_columns(5)
                                 .show(ui, |ui| {
                                     ui.strong("Type");
                                     ui.strong("Nom");
                                     ui.strong("Chemin");
+                                    ui.strong("Épaisseur (mm)");
                                     ui.strong("Quantité totale");
                                     ui.end_row();
 
@@ -160,6 +161,18 @@ pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> 
                                             is_processing,
                                             &mut actions,
                                         );
+                                        let thickness_label = item.thickness.map_or_else(
+                                            || "—".to_owned(),
+                                            |value| value.to_string(),
+                                        );
+                                        let thickness_response =
+                                            ui.selectable_label(false, thickness_label);
+                                        add_component_context_menu(
+                                            thickness_response,
+                                            &item.path,
+                                            is_processing,
+                                            &mut actions,
+                                        );
                                         let quantity_response =
                                             ui.selectable_label(false, item.quantity.to_string());
                                         add_component_context_menu(
@@ -195,7 +208,14 @@ fn show_tree_node(
         AssemblyItemKind::SheetMetal => "Tôlerie",
         AssemblyItemKind::Assembly => "Assemblage",
     };
-    let label = format!("{kind} — {} (Qté : {})", node.name, node.quantity);
+    let thickness = node
+        .thickness
+        .map(|value| format!(" — {value} mm"))
+        .unwrap_or_default();
+    let label = format!(
+        "{kind}{thickness} — {} (Qté : {})",
+        node.name, node.quantity
+    );
 
     if node.children.is_empty() {
         ui.push_id(id, |ui| {

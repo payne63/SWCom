@@ -1,6 +1,6 @@
 use std::{os::windows::ffi::OsStrExt, path::Path};
 
-use rust_xlsxwriter::Workbook;
+use rust_xlsxwriter::{Format, FormatAlign, FormatBorder, Workbook};
 use windows::{
     core::PCWSTR,
     Win32::Foundation::HWND,
@@ -49,12 +49,25 @@ impl XlsxHelper {
     ///
     /// # Errors
     /// Retourne une erreur si une cellule ou le classeur ne peut pas être écrit.
-    pub(crate) fn export_assembly_parts(
-        items: &[AssemblyItem],
-        path: &Path,
-    ) -> Result<(), String> {
+    pub(crate) fn export_assembly_parts(items: &[AssemblyItem], path: &Path) -> Result<(), String> {
         let mut workbook = Workbook::new();
         let worksheet = workbook.add_worksheet();
+        let mut column_edition = 0u32;
+        worksheet
+            .merge_range(
+                0,
+                0,
+                0,
+                4,
+                "Title",
+                &Format::new()
+                    .set_border(FormatBorder::Thin)
+                    .set_align(FormatAlign::Center),
+            )
+            .map_err(|error| error.to_string())?;
+
+        column_edition += 1;
+
         worksheet
             .set_column_width(0, 30)
             .map_err(|error| error.to_string())?;
@@ -65,26 +78,41 @@ impl XlsxHelper {
             .set_column_width(2, 30)
             .map_err(|error| error.to_string())?;
         worksheet
-            .set_column_width(3, 20)
+            .set_column_width(3, 16)
+            .map_err(|error| error.to_string())?;
+        worksheet
+            .set_column_width(4, 20)
             .map_err(|error| error.to_string())?;
 
         let format = &rust_xlsxwriter::Format::new().set_bold();
+        worksheet
+            .write_with_format(column_edition, 0, "Type", format)
+            .map_err(|error| error.to_string())?;
+        worksheet
+            .write_with_format(column_edition, 1, "Nom", format)
+            .map_err(|error| error.to_string())?;
+        worksheet
+            .write_with_format(column_edition, 2, "Emplacement", format)
+            .map_err(|error| error.to_string())?;
+        worksheet
+            .write_with_format(column_edition, 3, "Épaisseur (mm)", format)
+            .map_err(|error| error.to_string())?;
+        worksheet
+            .write_with_format(column_edition, 4, "Quantité totale", format)
+            .map_err(|error| error.to_string())?;
 
+        let item_count = u32::try_from(items.len())
+            .map_err(|_| "La liste contient trop de lignes pour un classeur Excel.".to_owned())?;
+        let last_row = column_edition
+            .checked_add(item_count)
+            .ok_or_else(|| "La liste contient trop de lignes pour un classeur Excel.".to_owned())?;
         worksheet
-            .write_with_format(0, 0, "Type", format)
-            .map_err(|error| error.to_string())?;
-        worksheet
-            .write_with_format(0, 1, "Nom", format)
-            .map_err(|error| error.to_string())?;
-        worksheet
-            .write_with_format(0, 2, "Emplacement", format)
-            .map_err(|error| error.to_string())?;
-        worksheet
-            .write_with_format(0, 3, "Quantité totale", format)
+            .autofilter(column_edition, 0, last_row, 4)
             .map_err(|error| error.to_string())?;
 
+        column_edition += 1;
         for (index, item) in items.iter().enumerate() {
-            let row = u32::try_from(index + 1).map_err(|_| {
+            let row = u32::try_from(index + column_edition as usize).map_err(|_| {
                 "La liste contient trop de lignes pour un classeur Excel.".to_owned()
             })?;
             let kind = match item.kind {
@@ -102,8 +130,13 @@ impl XlsxHelper {
             worksheet
                 .write_string(row, 2, &item.path)
                 .map_err(|error| error.to_string())?;
+            if let Some(thickness) = item.thickness {
+                worksheet
+                    .write_number(row, 3, thickness as f64)
+                    .map_err(|error| error.to_string())?;
+            }
             worksheet
-                .write_number(row, 3, item.quantity as f64)
+                .write_number(row, 4, item.quantity as f64)
                 .map_err(|error| error.to_string())?;
         }
 
