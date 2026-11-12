@@ -783,9 +783,25 @@ impl eframe::App for PropertiesGui {
             self.select_assembly_file(tab_id);
         }
         if let Some(tab_id) = assembly_export_tab_id {
+            let assembly_name = self
+                .tabs
+                .iter()
+                .find(|tab| tab.id == tab_id)
+                .and_then(|tab| Path::new(tab.assembly_file_path.trim()).file_stem())
+                .map(|name| name.to_string_lossy().into_owned())
+                .filter(|name| !name.is_empty())
+                .unwrap_or_else(|| "assemblage".to_owned());
+            let now = chrono::Local::now();
+            let file_name = format!(
+                "Extraction de {assembly_name} le {} à {}h{}.xlsx",
+                now.format("%d-%m-%y"),
+                now.format("%H"),
+                now.format("%M")
+            );
+
             if let Some(path) = FileDialog::new()
                 .add_filter("Classeur Excel", &["xlsx"])
-                .set_file_name("liste_assemblage.xlsx")
+                .set_file_name(&file_name)
                 .save_file()
             {
                 if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {

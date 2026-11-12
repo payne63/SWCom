@@ -1,4 +1,5 @@
-use egui::{Align, Grid, Layout, ScrollArea, TextEdit};
+use egui::{Align, Layout, ScrollArea, TextEdit};
+use egui_extras::{Column, TableBuilder};
 
 use crate::solidworks::{AssemblyItemKind, AssemblyTreeNode};
 
@@ -114,74 +115,105 @@ pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> 
                     ScrollArea::both()
                         .auto_shrink([false, false])
                         .show(ui, |ui| {
-                            Grid::new(("assembly_parts", tab.id))
+                            TableBuilder::new(ui)
+                                .id_salt(("assembly_parts", tab.id))
                                 .striped(true)
-                                .num_columns(5)
-                                .show(ui, |ui| {
-                                    ui.strong("Type");
-                                    ui.strong("Nom");
-                                    ui.strong("Chemin");
-                                    ui.strong("Épaisseur (mm)");
-                                    ui.strong("Quantité totale");
-                                    ui.end_row();
-
+                                .resizable(true)
+                                .vscroll(false)
+                                .column(Column::initial(110.0).at_least(70.0).clip(true))
+                                .column(Column::initial(180.0).at_least(90.0).clip(true))
+                                .column(Column::initial(320.0).at_least(120.0).clip(true))
+                                .column(Column::initial(110.0).at_least(80.0).clip(true))
+                                .column(Column::initial(140.0).at_least(90.0).clip(true))
+                                .header(26.0, |mut header| {
+                                    header.col(|ui| {
+                                        ui.strong("Type");
+                                    });
+                                    header.col(|ui| {
+                                        ui.strong("Nom");
+                                    });
+                                    header.col(|ui| {
+                                        ui.strong("Chemin");
+                                    });
+                                    header.col(|ui| {
+                                        ui.strong("Épaisseur (mm)");
+                                    });
+                                    header.col(|ui| {
+                                        ui.strong("Quantité totale");
+                                    });
+                                })
+                                .body(|mut body| {
                                     for item in &tab.assembly_parts {
                                         let label = match item.kind {
                                             AssemblyItemKind::Part => "Pièce",
                                             AssemblyItemKind::SheetMetal => "Tôlerie",
                                             AssemblyItemKind::Assembly => "Assemblage",
                                         };
-                                        let type_response = ui
-                                            .with_layout(
-                                                Layout::left_to_right(Align::Center),
-                                                |ui| {
-                                                    show_kind_icon(ui, item.kind);
-                                                    ui.selectable_label(false, label)
-                                                },
-                                            )
-                                            .inner;
-                                        add_component_context_menu(
-                                            type_response,
-                                            &item.path,
-                                            is_processing,
-                                            &mut actions,
-                                        );
-
-                                        let name_response = ui.selectable_label(false, &item.name);
-                                        add_component_context_menu(
-                                            name_response,
-                                            &item.path,
-                                            is_processing,
-                                            &mut actions,
-                                        );
-                                        let path_response = ui.selectable_label(false, &item.path);
-                                        add_component_context_menu(
-                                            path_response,
-                                            &item.path,
-                                            is_processing,
-                                            &mut actions,
-                                        );
-                                        let thickness_label = item.thickness.map_or_else(
-                                            || "—".to_owned(),
-                                            |value| value.to_string(),
-                                        );
-                                        let thickness_response =
-                                            ui.selectable_label(false, thickness_label);
-                                        add_component_context_menu(
-                                            thickness_response,
-                                            &item.path,
-                                            is_processing,
-                                            &mut actions,
-                                        );
-                                        let quantity_response =
-                                            ui.selectable_label(false, item.quantity.to_string());
-                                        add_component_context_menu(
-                                            quantity_response,
-                                            &item.path,
-                                            is_processing,
-                                            &mut actions,
-                                        );
-                                        ui.end_row();
+                                        body.row(26.0, |mut row| {
+                                            row.col(|ui| {
+                                                let type_response = ui
+                                                    .with_layout(
+                                                        Layout::left_to_right(Align::Center),
+                                                        |ui| {
+                                                            show_kind_icon(ui, item.kind);
+                                                            ui.selectable_label(false, label)
+                                                        },
+                                                    )
+                                                    .inner;
+                                                add_component_context_menu(
+                                                    type_response,
+                                                    &item.path,
+                                                    is_processing,
+                                                    &mut actions,
+                                                );
+                                            });
+                                            row.col(|ui| {
+                                                let response =
+                                                    ui.selectable_label(false, &item.name);
+                                                add_component_context_menu(
+                                                    response,
+                                                    &item.path,
+                                                    is_processing,
+                                                    &mut actions,
+                                                );
+                                            });
+                                            row.col(|ui| {
+                                                let response =
+                                                    ui.selectable_label(false, &item.path);
+                                                add_component_context_menu(
+                                                    response,
+                                                    &item.path,
+                                                    is_processing,
+                                                    &mut actions,
+                                                );
+                                            });
+                                            row.col(|ui| {
+                                                let thickness_label = item.thickness.map_or_else(
+                                                    || "—".to_owned(),
+                                                    |value| value.to_string(),
+                                                );
+                                                let response =
+                                                    ui.selectable_label(false, thickness_label);
+                                                add_component_context_menu(
+                                                    response,
+                                                    &item.path,
+                                                    is_processing,
+                                                    &mut actions,
+                                                );
+                                            });
+                                            row.col(|ui| {
+                                                let response = ui.selectable_label(
+                                                    false,
+                                                    item.quantity.to_string(),
+                                                );
+                                                add_component_context_menu(
+                                                    response,
+                                                    &item.path,
+                                                    is_processing,
+                                                    &mut actions,
+                                                );
+                                            });
+                                        });
                                     }
                                 });
                         });
