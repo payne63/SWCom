@@ -13,6 +13,7 @@ use crate::solidworks::{
 
 mod assembly_parts;
 mod print_plans;
+mod printers;
 mod solidworks_properties;
 
 type OperationResult = std::result::Result<WorkerOutcome, String>;
@@ -84,11 +85,16 @@ pub struct PropertiesGui {
     fonts_scaled: bool,
     home_texture: Option<egui::TextureHandle>,
     result_receiver: Option<Receiver<TaskResult>>,
+    available_printers: Vec<String>,
+    printer_a4_a3: String,
+    printer_a2_a0: String,
 }
 
 impl PropertiesGui {
     /// Crée l'interface graphique avec un état initial vide.
     pub fn new() -> Self {
+        let available_printers = printers::available_printers().unwrap_or_default();
+        let default_printer = available_printers.first().cloned().unwrap_or_default();
         Self {
             tabs: vec![
                 AppTab {
@@ -166,6 +172,9 @@ impl PropertiesGui {
             fonts_scaled: false,
             home_texture: None,
             result_receiver: None,
+            available_printers,
+            printer_a4_a3: default_printer.clone(),
+            printer_a2_a0: default_printer,
         }
     }
 
@@ -386,22 +395,37 @@ impl PropertiesGui {
 
     /// Lance l'impression séquentielle des plans sélectionnés.
     fn print_plans(&mut self, tab_id: u64, context: &egui::Context) {
-        let Some(paths) = self
+        let Some(plans) = self
             .tabs
             .iter()
             .find(|tab| tab.id == tab_id)
-            .map(|tab| tab.print_plan_paths.clone())
+            .map(|tab| tab.print_plan_rows.clone())
         else {
             return;
         };
-        if paths.is_empty() {
+        if plans.is_empty() {
             return;
         }
+        let a4_a3_printer = self.printer_a4_a3.clone();
+        let a2_a0_printer = self.printer_a2_a0.clone();
 
         self.start_worker(tab_id, context, move || {
             run_solidworks_operation_without_shutdown(|solidworks| {
-                for path in &paths {
-                    solidworks.print_drawing(path).map_err(|error| {
+                for (path, format) in &plans {
+                    let printer = match format.as_str() {
+                        "A4" | "A3" => &a4_a3_printer,
+                        "A2" | "A1" | "A0" => &a2_a0_printer,
+                        _ => {
+                            return Err(windows::core::Error::new(
+                                windows::core::HRESULT(0x80070057_u32 as i32),
+                                format!(
+                                    "Format papier non pris en charge pour '{path}' : {format}"
+                                )
+                                .into(),
+                            ));
+                        }
+                    };
+                    solidworks.print_drawing(path, printer).map_err(|error| {
                         windows::core::Error::new(
                             error.code(),
                             format!("Échec de l'impression de '{path}' : {error:?}").into(),
@@ -410,7 +434,7 @@ impl PropertiesGui {
                 }
                 Ok(())
             })?;
-            Ok(WorkerOutcome::PlansPrinted(paths.len()))
+            Ok(WorkerOutcome::PlansPrinted(plans.len()))
         });
     }
 
@@ -902,7 +926,14 @@ impl eframe::App for PropertiesGui {
                     .iter_mut()
                     .find(|tab| tab.id == self.active_tab_id)
                 {
-                    let actions = print_plans::show(ui, tab, is_processing);
+                    let actions = print_plans::show(
+                        ui,
+                        tab,
+                        &self.available_printers,
+                        &mut self.printer_a4_a3,
+                        &mut self.printer_a2_a0,
+                        is_processing,
+                    );
                     if actions.browse_clicked {
                         print_browse_tab_id = Some(tab.id);
                     }

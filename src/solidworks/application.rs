@@ -102,9 +102,9 @@ impl SolidWorksApp {
         super::properties::drawing_paper_size(&self.dispatch, file_path)
     }
 
-    /// Imprime un dessin `.slddrw` avec l'imprimante et les réglages actifs de SolidWorks.
-    pub fn print_drawing(&self, file_path: &str) -> Result<()> {
-        super::properties::print_drawing(&self.dispatch, file_path)
+    /// Imprime un dessin `.slddrw` sur l'imprimante spécifiée.
+    pub fn print_drawing(&self, file_path: &str, printer_name: &str) -> Result<()> {
+        super::properties::print_drawing(&self.dispatch, file_path, printer_name)
     }
 
     /// Ouvre ou active un document SolidWorks et place sa fenêtre au premier plan.

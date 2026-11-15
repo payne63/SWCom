@@ -13,7 +13,7 @@ use super::dispatch::{
     bool_from_variant, byref_bool, byref_bstr, byref_f64, byref_i32, dispatch_array_from_variant,
     dispatch_from_variant, f64_from_variant, i32_from_variant, i64_from_variant, invoke,
     invoke_string, optional_dispatch_from_variant, string_array_from_variant, variant_bool,
-    variant_bstr, variant_i32,
+    variant_bstr, variant_dispatch, variant_i32,
 };
 
 /// Un composant référencé par un assemblage et son nombre total d'occurrences.
@@ -307,7 +307,7 @@ pub(super) fn drawing_paper_size(sw_app: &IDispatch, file_path: &str) -> Result<
     .to_owned())
 }
 
-pub(super) fn print_drawing(sw_app: &IDispatch, file_path: &str) -> Result<()> {
+pub(super) fn print_drawing(sw_app: &IDispatch, file_path: &str, printer_name: &str) -> Result<()> {
     if document_type(file_path)? != 3 {
         return Err(Error::new(
             HRESULT(0x80070057_u32 as i32),
@@ -316,7 +316,28 @@ pub(super) fn print_drawing(sw_app: &IDispatch, file_path: &str) -> Result<()> {
     }
 
     let (document, _) = open_or_reuse_document(sw_app, file_path, 3, 1)?;
-    invoke(&document, "PrintOut", DISPATCH_METHOD, &mut [], false)?;
+    let extension = invoke(&document, "Extension", DISPATCH_PROPERTYGET, &mut [], true)?;
+    let extension = dispatch_from_variant(&extension)?;
+    let print_specification = invoke(
+        &extension,
+        "GetPrintSpecification",
+        DISPATCH_METHOD,
+        &mut [],
+        true,
+    )?;
+    let print_specification = dispatch_from_variant(&print_specification)?;
+    let mut arguments = [
+        variant_dispatch(&print_specification),
+        variant_bstr(""),
+        variant_bstr(printer_name),
+    ];
+    invoke(
+        &extension,
+        "PrintOut4",
+        DISPATCH_METHOD,
+        &mut arguments,
+        false,
+    )?;
     Ok(())
 }
 

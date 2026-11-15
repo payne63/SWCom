@@ -12,11 +12,30 @@ pub(super) struct Actions {
     pub(super) paths_changed: bool,
 }
 
-pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> Actions {
+pub(super) fn show(
+    ui: &mut egui::Ui,
+    tab: &mut AppTab,
+    available_printers: &[String],
+    printer_a4_a3: &mut String,
+    printer_a2_a0: &mut String,
+    is_processing: bool,
+) -> Actions {
     let mut actions = Actions::default();
 
     ui.heading("Impression Plans");
     ui.label("Sélectionnez un ou plusieurs plans SolidWorks (.slddrw), ou déposez-les ici.");
+    ui.horizontal(|ui| {
+        ui.label("Imprimante A4 / A3 :");
+        printer_combo(ui, "printer_a4_a3", available_printers, printer_a4_a3);
+        ui.label("Imprimante A2 / A1 / A0 :");
+        printer_combo(ui, "printer_a2_a0", available_printers, printer_a2_a0);
+    });
+    if available_printers.is_empty() {
+        ui.colored_label(
+            ui.visuals().error_fg_color,
+            "Aucune imprimante disponible détectée sur ce poste.",
+        );
+    }
     ui.add_space(8.0);
 
     if let Some(dropped_paths) = dropped_drawing_paths(ui) {
@@ -55,7 +74,9 @@ pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> 
                     .add_enabled(
                         !is_processing
                             && tab.print_plans_visible
-                            && !tab.print_plan_paths.is_empty(),
+                            && !tab.print_plan_rows.is_empty()
+                            && !printer_a4_a3.is_empty()
+                            && !printer_a2_a0.is_empty(),
                         egui::Button::new("Démarrer les impressions").min_size(button_size),
                     )
                     .clicked();
@@ -120,6 +141,25 @@ pub(super) fn show(ui: &mut egui::Ui, tab: &mut AppTab, is_processing: bool) -> 
     });
 
     actions
+}
+
+fn printer_combo(
+    ui: &mut egui::Ui,
+    id: &'static str,
+    printers: &[String],
+    selected_printer: &mut String,
+) {
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(if selected_printer.is_empty() {
+            "Choisir une imprimante"
+        } else {
+            selected_printer.as_str()
+        })
+        .show_ui(ui, |ui| {
+            for printer in printers {
+                ui.selectable_value(selected_printer, printer.clone(), printer);
+            }
+        });
 }
 
 fn dropped_drawing_paths(ui: &egui::Ui) -> Option<Vec<std::path::PathBuf>> {
