@@ -12,6 +12,7 @@ use crate::solidworks::{
 };
 
 mod assembly_parts;
+mod print_plans;
 mod solidworks_properties;
 
 type OperationResult = std::result::Result<WorkerOutcome, String>;
@@ -24,6 +25,7 @@ enum TabKind {
     Home,
     SolidWorksProperties,
     AssemblyParts,
+    PrintPlans,
 }
 
 struct AppTab {
@@ -37,6 +39,9 @@ struct AppTab {
     assembly_loaded: bool,
     assembly_status: Option<String>,
     assembly_status_is_error: bool,
+    print_plan_paths: Vec<String>,
+    print_plan_rows: Vec<(String, String)>,
+    print_plans_visible: bool,
 }
 
 /// Résultat métier transmis par le thread de travail à l'interface.
@@ -56,6 +61,10 @@ enum WorkerOutcome {
         exported_count: usize,
         failures: Vec<String>,
     },
+    /// Plans chargés avec leur format papier.
+    PrintPlansLoaded(Vec<(String, String)>),
+    /// Nombre de plans envoyés successivement à l'imprimante.
+    PlansPrinted(usize),
 }
 
 /// Interface de sélection d'un fichier et d'affichage de ses propriétés SolidWorks.
@@ -93,6 +102,9 @@ impl PropertiesGui {
                     assembly_loaded: false,
                     assembly_status: None,
                     assembly_status_is_error: false,
+                    print_plan_paths: Vec::new(),
+                    print_plan_rows: Vec::new(),
+                    print_plans_visible: false,
                 },
                 AppTab {
                     id: MAIN_TAB_ID + 1,
@@ -105,6 +117,9 @@ impl PropertiesGui {
                     assembly_loaded: false,
                     assembly_status: None,
                     assembly_status_is_error: false,
+                    print_plan_paths: Vec::new(),
+                    print_plan_rows: Vec::new(),
+                    print_plans_visible: false,
                 },
                 AppTab {
                     id: MAIN_TAB_ID + 2,
@@ -117,6 +132,24 @@ impl PropertiesGui {
                     assembly_loaded: false,
                     assembly_status: None,
                     assembly_status_is_error: false,
+                    print_plan_paths: Vec::new(),
+                    print_plan_rows: Vec::new(),
+                    print_plans_visible: false,
+                },
+                AppTab {
+                    id: MAIN_TAB_ID + 3,
+                    title: "Impression Plans".to_owned(),
+                    kind: TabKind::PrintPlans,
+                    assembly_file_path: String::new(),
+                    assembly_parts: Vec::new(),
+                    assembly_tree: None,
+                    assembly_tree_view: false,
+                    assembly_loaded: false,
+                    assembly_status: None,
+                    assembly_status_is_error: false,
+                    print_plan_paths: Vec::new(),
+                    print_plan_rows: Vec::new(),
+                    print_plans_visible: false,
                 },
             ],
             active_tab_id: MAIN_TAB_ID,
@@ -299,6 +332,88 @@ impl PropertiesGui {
         }
     }
 
+    /// Ouvre un sélecteur de plusieurs dessins SolidWorks à ajouter à la liste.
+    fn select_print_files(&mut self, tab_id: u64) {
+        let paths = FileDialog::new()
+            .add_filter("Plans SolidWorks", &["slddrw"])
+            .pick_files();
+        if let Some(paths) = paths {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                for path in paths {
+                    let path = path.display().to_string();
+                    if !tab.print_plan_paths.contains(&path) {
+                        tab.print_plan_paths.push(path);
+                        tab.print_plan_rows.clear();
+                        tab.print_plans_visible = false;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Charge les formats papier des dessins sélectionnés sur le thread SolidWorks.
+    fn load_print_plans(&mut self, tab_id: u64, context: &egui::Context) {
+        let Some(paths) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.print_plan_paths.clone())
+        else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+
+        self.start_worker(tab_id, context, move || {
+            let rows = run_solidworks_operation_without_shutdown(|solidworks| {
+                let mut rows = Vec::with_capacity(paths.len());
+                for path in &paths {
+                    let format = solidworks.drawing_paper_size(path).map_err(|error| {
+                        windows::core::Error::new(
+                            error.code(),
+                            format!("Lecture du format impossible pour '{path}' : {error:?}")
+                                .into(),
+                        )
+                    })?;
+                    rows.push((path.clone(), format));
+                }
+                Ok(rows)
+            })?;
+            Ok(WorkerOutcome::PrintPlansLoaded(rows))
+        });
+    }
+
+    /// Lance l'impression séquentielle des plans sélectionnés.
+    fn print_plans(&mut self, tab_id: u64, context: &egui::Context) {
+        let Some(paths) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.print_plan_paths.clone())
+        else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+
+        self.start_worker(tab_id, context, move || {
+            run_solidworks_operation_without_shutdown(|solidworks| {
+                for path in &paths {
+                    solidworks.print_drawing(path).map_err(|error| {
+                        windows::core::Error::new(
+                            error.code(),
+                            format!("Échec de l'impression de '{path}' : {error:?}").into(),
+                        )
+                    })?;
+                }
+                Ok(())
+            })?;
+            Ok(WorkerOutcome::PlansPrinted(paths.len()))
+        });
+    }
+
     /// Indique si au moins une valeur diffère de sa valeur chargée.
     fn has_changes(&self) -> bool {
         self.loaded_file_path.as_deref() == Some(self.file_path.as_str())
@@ -396,6 +511,22 @@ impl PropertiesGui {
                         tab.assembly_tree = Some(tree);
                         tab.assembly_loaded = true;
                         tab.assembly_status = None;
+                        tab.assembly_status_is_error = false;
+                    }
+                }
+                Ok(WorkerOutcome::PrintPlansLoaded(rows)) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        tab.print_plan_rows = rows;
+                        tab.print_plans_visible = true;
+                        tab.assembly_status = None;
+                        tab.assembly_status_is_error = false;
+                    }
+                }
+                Ok(WorkerOutcome::PlansPrinted(count)) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        tab.assembly_status = Some(format!(
+                            "{count} plan(s) envoyé(s) à l'impression avec les réglages de SolidWorks."
+                        ));
                         tab.assembly_status_is_error = false;
                     }
                 }
@@ -583,6 +714,10 @@ impl eframe::App for PropertiesGui {
         let mut assembly_export_tab_id = None;
         let mut assembly_dxf_export_tab_id = None;
         let mut assembly_path_changed_tab_id = None;
+        let mut print_browse_tab_id = None;
+        let mut print_show_tab_id = None;
+        let mut print_tab_id = None;
+        let mut print_paths_changed_tab_id = None;
 
         TopBottomPanel::top("app_toolbar").show(context, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -649,7 +784,7 @@ impl eframe::App for PropertiesGui {
                     self.has_changes()
                         .then(|| ("Modifications non enregistrées.".to_owned(), None))
                 }),
-            TabKind::AssemblyParts => self
+            TabKind::AssemblyParts | TabKind::PrintPlans => self
                 .tabs
                 .iter()
                 .find(|tab| tab.id == active_tab_id)
@@ -761,6 +896,27 @@ impl eframe::App for PropertiesGui {
                     }
                 }
             }
+            TabKind::PrintPlans => {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == self.active_tab_id)
+                {
+                    let actions = print_plans::show(ui, tab, is_processing);
+                    if actions.browse_clicked {
+                        print_browse_tab_id = Some(tab.id);
+                    }
+                    if actions.show_plans_clicked {
+                        print_show_tab_id = Some(tab.id);
+                    }
+                    if actions.print_clicked {
+                        print_tab_id = Some(tab.id);
+                    }
+                    if actions.paths_changed {
+                        print_paths_changed_tab_id = Some(tab.id);
+                    }
+                }
+            }
         });
 
         if file_path_changed {
@@ -778,6 +934,18 @@ impl eframe::App for PropertiesGui {
         }
         if browse_clicked {
             self.select_file();
+        }
+        if let Some(tab_id) = print_paths_changed_tab_id {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.print_plan_rows.clear();
+                tab.print_plans_visible = false;
+            }
+        }
+        if let Some(tab_id) = print_browse_tab_id {
+            self.select_print_files(tab_id);
+        }
+        if let Some(tab_id) = print_show_tab_id {
+            self.load_print_plans(tab_id, context);
         }
         if let Some(tab_id) = assembly_browse_tab_id {
             self.select_assembly_file(tab_id);
@@ -849,6 +1017,8 @@ impl eframe::App for PropertiesGui {
             self.update_file(context);
         } else if let Some(tab_id) = assembly_process_tab_id {
             self.process_assembly_tab(tab_id, context);
+        } else if let Some(tab_id) = print_tab_id {
+            self.print_plans(tab_id, context);
         }
     }
 }

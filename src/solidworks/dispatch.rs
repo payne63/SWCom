@@ -304,3 +304,14 @@ pub(super) fn byref_i32(value: &mut i32) -> VARIANT {
     }
     variant
 }
+
+/// Construit un `VARIANT` `VT_R8 | VT_BYREF` vers un flottant de sortie.
+pub(super) fn byref_f64(value: &mut f64) -> VARIANT {
+    let mut variant = VARIANT::default();
+    unsafe {
+        let raw = &mut variant.Anonymous.Anonymous;
+        raw.vt = VARENUM(VT_R8.0 | VT_BYREF.0);
+        raw.Anonymous.pdblVal = value;
+    }
+    variant
+}

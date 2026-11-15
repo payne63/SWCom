@@ -97,6 +97,16 @@ impl SolidWorksApp {
         super::properties::update_file_properties(&self.dispatch, file_path, properties)
     }
 
+    /// Retourne le format papier A (A4 à A0) de la feuille active d'un dessin.
+    pub fn drawing_paper_size(&self, file_path: &str) -> Result<String> {
+        super::properties::drawing_paper_size(&self.dispatch, file_path)
+    }
+
+    /// Imprime un dessin `.slddrw` avec l'imprimante et les réglages actifs de SolidWorks.
+    pub fn print_drawing(&self, file_path: &str) -> Result<()> {
+        super::properties::print_drawing(&self.dispatch, file_path)
+    }
+
     /// Ouvre ou active un document SolidWorks et place sa fenêtre au premier plan.
     ///
     /// Le document reste ouvert après l'appel, même si l'instance SolidWorks a été lancée par

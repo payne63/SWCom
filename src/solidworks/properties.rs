@@ -10,7 +10,7 @@ use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE};
 
 use super::dispatch::{
-    bool_from_variant, byref_bool, byref_bstr, byref_i32, dispatch_array_from_variant,
+    bool_from_variant, byref_bool, byref_bstr, byref_f64, byref_i32, dispatch_array_from_variant,
     dispatch_from_variant, f64_from_variant, i32_from_variant, i64_from_variant, invoke,
     invoke_string, optional_dispatch_from_variant, string_array_from_variant, variant_bool,
     variant_bstr, variant_i32,
@@ -269,6 +269,57 @@ pub(super) fn get_file_properties(
 /// # Errors
 /// Renvoie une erreur si le chemin est invalide ou si l'ouverture, l'activation ou la mise
 /// au premier plan échoue.
+pub(super) fn drawing_paper_size(sw_app: &IDispatch, file_path: &str) -> Result<String> {
+    if document_type(file_path)? != 3 {
+        return Err(Error::new(
+            HRESULT(0x80070057_u32 as i32),
+            "La lecture du format nécessite un fichier .slddrw".into(),
+        ));
+    }
+
+    let (document, opened_by_this_call) = open_or_reuse_document(sw_app, file_path, 3, 1)?;
+    let paper_size = (|| {
+        let sheet = invoke(&document, "GetCurrentSheet", DISPATCH_METHOD, &mut [], true)?;
+        let sheet = dispatch_from_variant(&sheet)?;
+        let mut width = 0.0;
+        let mut height = 0.0;
+        let mut arguments = [byref_f64(&mut height), byref_f64(&mut width)];
+        let paper_size = invoke(&sheet, "GetSize", DISPATCH_METHOD, &mut arguments, true)?;
+        i32_from_variant(&paper_size)
+    })();
+
+    let close_result = if opened_by_this_call {
+        close_document(sw_app, &document, file_path)
+    } else {
+        Ok(())
+    };
+    let paper_size = paper_size?;
+    close_result?;
+
+    Ok(match paper_size {
+        6 | 7 => "A4",
+        8 => "A3",
+        9 => "A2",
+        10 => "A1",
+        11 => "A0",
+        _ => "Autre",
+    }
+    .to_owned())
+}
+
+pub(super) fn print_drawing(sw_app: &IDispatch, file_path: &str) -> Result<()> {
+    if document_type(file_path)? != 3 {
+        return Err(Error::new(
+            HRESULT(0x80070057_u32 as i32),
+            "L'impression nécessite un fichier .slddrw".into(),
+        ));
+    }
+
+    let (document, _) = open_or_reuse_document(sw_app, file_path, 3, 1)?;
+    invoke(&document, "PrintOut", DISPATCH_METHOD, &mut [], false)?;
+    Ok(())
+}
+
 pub(super) fn open_file_and_activate(sw_app: &IDispatch, file_path: &str) -> Result<()> {
     let document_type = document_type(file_path)?;
     let (document, _) = open_or_reuse_document(sw_app, file_path, document_type, 1)?;
@@ -341,7 +392,7 @@ pub(super) fn update_file_properties(
 /// Détermine le type SolidWorks à partir de l'extension du fichier.
 ///
 /// # Errors
-/// Renvoie `E_INVALIDARG` si le fichier n'est ni une pièce ni un assemblage.
+/// Renvoie `E_INVALIDARG` si le fichier n'est pas une pièce, un assemblage ou un dessin.
 fn document_type(file_path: &str) -> Result<i32> {
     let extension = Path::new(file_path)
         .extension()
@@ -352,10 +403,12 @@ fn document_type(file_path: &str) -> Result<i32> {
         Ok(1) // swDocPART
     } else if extension.eq_ignore_ascii_case("sldasm") {
         Ok(2) // swDocASSEMBLY
+    } else if extension.eq_ignore_ascii_case("slddrw") {
+        Ok(3) // swDocDRAWING
     } else {
         Err(Error::new(
             HRESULT(0x80070057_u32 as i32),
-            "Le fichier doit être un .sldprt ou un .sldasm".into(),
+            "Le fichier doit être un .sldprt, un .sldasm ou un .slddrw".into(),
         ))
     }
 }
