@@ -848,6 +848,16 @@ pub(super) fn dropped_file_path(ui: &egui::Ui, accepted_extensions: &[&str]) -> 
     })
 }
 
+/// Choisit une couleur de statut lisible sur le fond du thème actif.
+fn status_color(is_error: bool, dark_mode: bool) -> egui::Color32 {
+    match (is_error, dark_mode) {
+        (false, false) => egui::Color32::from_rgb(0, 100, 0),
+        (false, true) => egui::Color32::from_rgb(130, 220, 130),
+        (true, false) => egui::Color32::from_rgb(160, 0, 0),
+        (true, true) => egui::Color32::from_rgb(255, 125, 125),
+    }
+}
+
 /// Décode l'image PNG intégrée et la charge une fois comme texture egui.
 fn load_home_texture(context: &egui::Context) -> egui::TextureHandle {
     let image = image::load_from_memory(include_bytes!("../images/evolution.png"))
@@ -957,11 +967,7 @@ impl eframe::App for PropertiesGui {
                 .map(|status| {
                     (
                         status.clone(),
-                        Some(if self.status_is_error {
-                            egui::Color32::LIGHT_RED
-                        } else {
-                            egui::Color32::LIGHT_GREEN
-                        }),
+                        Some(status_color(self.status_is_error, self.dark_mode)),
                     )
                 })
                 .or_else(|| {
@@ -976,11 +982,7 @@ impl eframe::App for PropertiesGui {
                     tab.assembly_status.as_ref().map(|status| {
                         (
                             status.clone(),
-                            Some(if tab.assembly_status_is_error {
-                                egui::Color32::LIGHT_RED
-                            } else {
-                                egui::Color32::LIGHT_GREEN
-                            }),
+                            Some(status_color(tab.assembly_status_is_error, self.dark_mode)),
                         )
                     })
                 }),
