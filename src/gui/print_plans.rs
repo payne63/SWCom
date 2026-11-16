@@ -7,6 +7,7 @@ use super::AppTab;
 #[derive(Default)]
 pub(super) struct Actions {
     pub(super) browse_clicked: bool,
+    pub(super) clear_clicked: bool,
     pub(super) show_plans_clicked: bool,
     pub(super) print_clicked: bool,
     pub(super) paths_changed: bool,
@@ -38,12 +39,16 @@ pub(super) fn show(
     }
     ui.add_space(8.0);
 
-    if let Some(dropped_paths) = dropped_drawing_paths(ui) {
-        for path in dropped_paths {
-            let path = path.display().to_string();
-            if !tab.print_plan_paths.contains(&path) {
-                tab.print_plan_paths.push(path);
-                actions.paths_changed = true;
+    if !is_processing {
+        if let Some(dropped_paths) = dropped_drawing_paths(ui) {
+            for path in dropped_paths {
+                let path = path.display().to_string();
+                if !tab.print_plan_paths.contains(&path) {
+                    tab.print_plan_paths.push(path.clone());
+                    tab.print_plan_rows.push((path, String::new()));
+                    tab.print_plans_visible = true;
+                    actions.paths_changed = true;
+                }
             }
         }
     }
@@ -64,10 +69,16 @@ pub(super) fn show(
                         egui::Button::new("Parcourir…").min_size(button_size),
                     )
                     .clicked();
+                actions.clear_clicked = ui
+                    .add_enabled(
+                        !is_processing && !tab.print_plan_paths.is_empty(),
+                        egui::Button::new("Effacer la liste").min_size(button_size),
+                    )
+                    .clicked();
                 actions.show_plans_clicked = ui
                     .add_enabled(
                         !is_processing && !tab.print_plan_paths.is_empty(),
-                        egui::Button::new("Afficher les plans").min_size(button_size),
+                        egui::Button::new("Recherche du format").min_size(button_size),
                     )
                     .clicked();
                 actions.print_clicked = ui
@@ -75,6 +86,10 @@ pub(super) fn show(
                         !is_processing
                             && tab.print_plans_visible
                             && !tab.print_plan_rows.is_empty()
+                            && tab
+                                .print_plan_rows
+                                .iter()
+                                .all(|(_, format)| !format.is_empty())
                             && !printer_a4_a3.is_empty()
                             && !printer_a2_a0.is_empty(),
                         egui::Button::new("Démarrer les impressions").min_size(button_size),
@@ -85,9 +100,16 @@ pub(super) fn show(
                     "{} plan(s) sélectionné(s)",
                     tab.print_plan_paths.len()
                 ));
-                if !tab.print_plans_visible {
+                if tab.print_plan_paths.is_empty() {
                     ui.add_space(4.0);
-                    ui.label("La liste sera affichée après validation.");
+                    ui.label("Aucun plan sélectionné.");
+                } else if tab
+                    .print_plan_rows
+                    .iter()
+                    .any(|(_, format)| format.is_empty())
+                {
+                    ui.add_space(4.0);
+                    ui.label("Cliquez sur « Afficher les plans » pour charger les formats.");
                 }
             },
         );

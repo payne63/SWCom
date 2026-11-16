@@ -348,13 +348,23 @@ impl PropertiesGui {
             .pick_files();
         if let Some(paths) = paths {
             if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                let mut added_path = false;
                 for path in paths {
                     let path = path.display().to_string();
                     if !tab.print_plan_paths.contains(&path) {
                         tab.print_plan_paths.push(path);
-                        tab.print_plan_rows.clear();
-                        tab.print_plans_visible = false;
+                        added_path = true;
                     }
+                }
+                if added_path {
+                    tab.print_plan_rows = tab
+                        .print_plan_paths
+                        .iter()
+                        .map(|path| (path.clone(), String::new()))
+                        .collect();
+                    tab.print_plans_visible = true;
+                    tab.assembly_status = None;
+                    tab.assembly_status_is_error = false;
                 }
             }
         }
@@ -739,6 +749,7 @@ impl eframe::App for PropertiesGui {
         let mut assembly_dxf_export_tab_id = None;
         let mut assembly_path_changed_tab_id = None;
         let mut print_browse_tab_id = None;
+        let mut print_clear_tab_id = None;
         let mut print_show_tab_id = None;
         let mut print_tab_id = None;
         let mut print_paths_changed_tab_id = None;
@@ -937,6 +948,9 @@ impl eframe::App for PropertiesGui {
                     if actions.browse_clicked {
                         print_browse_tab_id = Some(tab.id);
                     }
+                    if actions.clear_clicked {
+                        print_clear_tab_id = Some(tab.id);
+                    }
                     if actions.show_plans_clicked {
                         print_show_tab_id = Some(tab.id);
                     }
@@ -968,8 +982,23 @@ impl eframe::App for PropertiesGui {
         }
         if let Some(tab_id) = print_paths_changed_tab_id {
             if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.print_plan_rows = tab
+                    .print_plan_paths
+                    .iter()
+                    .map(|path| (path.clone(), String::new()))
+                    .collect();
+                tab.print_plans_visible = !tab.print_plan_rows.is_empty();
+                tab.assembly_status = None;
+                tab.assembly_status_is_error = false;
+            }
+        }
+        if let Some(tab_id) = print_clear_tab_id {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.print_plan_paths.clear();
                 tab.print_plan_rows.clear();
                 tab.print_plans_visible = false;
+                tab.assembly_status = None;
+                tab.assembly_status_is_error = false;
             }
         }
         if let Some(tab_id) = print_browse_tab_id {
