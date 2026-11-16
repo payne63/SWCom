@@ -15,6 +15,7 @@ mod assembly_parts;
 mod print_plans;
 mod printers;
 mod solidworks_properties;
+mod step_export;
 
 type OperationResult = std::result::Result<WorkerOutcome, String>;
 type TaskResult = (u64, OperationResult);
@@ -27,6 +28,7 @@ enum TabKind {
     SolidWorksProperties,
     AssemblyParts,
     PrintPlans,
+    StepExport,
 }
 
 struct AppTab {
@@ -43,6 +45,7 @@ struct AppTab {
     print_plan_paths: Vec<String>,
     print_plan_rows: Vec<(String, String)>,
     print_plans_visible: bool,
+    step_file_paths: Vec<String>,
 }
 
 /// Résultat métier transmis par le thread de travail à l'interface.
@@ -64,6 +67,11 @@ enum WorkerOutcome {
     },
     /// Plans chargés avec leur format papier.
     PrintPlansLoaded(Vec<(String, String)>),
+    /// Résultats de l'export STEP des pièces et assemblages sélectionnés.
+    StepFilesExported {
+        exported_count: usize,
+        failures: Vec<String>,
+    },
     /// Résultats de l'export PDF des plans sélectionnés.
     PdfExported {
         exported_count: usize,
@@ -116,6 +124,7 @@ impl PropertiesGui {
                     print_plan_paths: Vec::new(),
                     print_plan_rows: Vec::new(),
                     print_plans_visible: false,
+                    step_file_paths: Vec::new(),
                 },
                 AppTab {
                     id: MAIN_TAB_ID + 1,
@@ -131,6 +140,7 @@ impl PropertiesGui {
                     print_plan_paths: Vec::new(),
                     print_plan_rows: Vec::new(),
                     print_plans_visible: false,
+                    step_file_paths: Vec::new(),
                 },
                 AppTab {
                     id: MAIN_TAB_ID + 2,
@@ -146,6 +156,7 @@ impl PropertiesGui {
                     print_plan_paths: Vec::new(),
                     print_plan_rows: Vec::new(),
                     print_plans_visible: false,
+                    step_file_paths: Vec::new(),
                 },
                 AppTab {
                     id: MAIN_TAB_ID + 3,
@@ -161,6 +172,23 @@ impl PropertiesGui {
                     print_plan_paths: Vec::new(),
                     print_plan_rows: Vec::new(),
                     print_plans_visible: false,
+                    step_file_paths: Vec::new(),
+                },
+                AppTab {
+                    id: MAIN_TAB_ID + 4,
+                    title: "Export STEP".to_owned(),
+                    kind: TabKind::StepExport,
+                    assembly_file_path: String::new(),
+                    assembly_parts: Vec::new(),
+                    assembly_tree: None,
+                    assembly_tree_view: false,
+                    assembly_loaded: false,
+                    assembly_status: None,
+                    assembly_status_is_error: false,
+                    print_plan_paths: Vec::new(),
+                    print_plan_rows: Vec::new(),
+                    print_plans_visible: false,
+                    step_file_paths: Vec::new(),
                 },
             ],
             active_tab_id: MAIN_TAB_ID,
@@ -370,6 +398,51 @@ impl PropertiesGui {
                 failures,
             })
         });
+    }
+
+    /// Exporte les pièces et assemblages sélectionnés au format STEP AP214.
+    fn export_step_files(&mut self, tab_id: u64, context: &egui::Context) {
+        let Some(paths) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.step_file_paths.clone())
+        else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+
+        self.start_worker(tab_id, context, move || {
+            let (exported_count, failures) =
+                run_solidworks_operation_without_shutdown(|solidworks| {
+                    solidworks.export_step_files(&paths)
+                })?;
+            Ok(WorkerOutcome::StepFilesExported {
+                exported_count,
+                failures,
+            })
+        });
+    }
+
+    /// Ouvre un sélecteur de pièces et d'assemblages SolidWorks à ajouter à la liste.
+    fn select_step_files(&mut self, tab_id: u64) {
+        let paths = FileDialog::new()
+            .add_filter("Pièces et assemblages SolidWorks", &["sldprt", "sldasm"])
+            .pick_files();
+        if let Some(paths) = paths {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                for path in paths {
+                    let path = path.display().to_string();
+                    if !tab.step_file_paths.contains(&path) {
+                        tab.step_file_paths.push(path);
+                    }
+                }
+                tab.assembly_status = None;
+                tab.assembly_status_is_error = false;
+            }
+        }
     }
 
     /// Ouvre un sélecteur de plusieurs dessins SolidWorks à ajouter à la liste.
@@ -585,6 +658,26 @@ impl PropertiesGui {
                         tab.print_plans_visible = true;
                         tab.assembly_status = None;
                         tab.assembly_status_is_error = false;
+                    }
+                }
+                Ok(WorkerOutcome::StepFilesExported {
+                    exported_count,
+                    failures,
+                }) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        if failures.is_empty() {
+                            tab.assembly_status = Some(format!(
+                                "{exported_count} fichier(s) STEP AP214 exporté(s) dans les répertoires d'origine."
+                            ));
+                            tab.assembly_status_is_error = false;
+                        } else {
+                            let first_failure = &failures[0];
+                            tab.assembly_status = Some(format!(
+                                "{exported_count} STEP créé(s), {} échec(s). Premier échec : {first_failure}",
+                                failures.len()
+                            ));
+                            tab.assembly_status_is_error = true;
+                        }
                     }
                 }
                 Ok(WorkerOutcome::PdfExported {
@@ -805,6 +898,10 @@ impl eframe::App for PropertiesGui {
         let mut print_tab_id = None;
         let mut print_pdf_tab_id = None;
         let mut print_paths_changed_tab_id = None;
+        let mut step_browse_tab_id = None;
+        let mut step_clear_tab_id = None;
+        let mut step_export_tab_id = None;
+        let mut step_paths_changed_tab_id = None;
 
         TopBottomPanel::top("app_toolbar").show(context, |ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
@@ -871,7 +968,7 @@ impl eframe::App for PropertiesGui {
                     self.has_changes()
                         .then(|| ("Modifications non enregistrées.".to_owned(), None))
                 }),
-            TabKind::AssemblyParts | TabKind::PrintPlans => self
+            TabKind::AssemblyParts | TabKind::PrintPlans | TabKind::StepExport => self
                 .tabs
                 .iter()
                 .find(|tab| tab.id == active_tab_id)
@@ -1017,6 +1114,27 @@ impl eframe::App for PropertiesGui {
                     }
                 }
             }
+            TabKind::StepExport => {
+                if let Some(tab) = self
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == self.active_tab_id)
+                {
+                    let actions = step_export::show(ui, tab, is_processing);
+                    if actions.browse_clicked {
+                        step_browse_tab_id = Some(tab.id);
+                    }
+                    if actions.clear_clicked {
+                        step_clear_tab_id = Some(tab.id);
+                    }
+                    if actions.export_clicked {
+                        step_export_tab_id = Some(tab.id);
+                    }
+                    if actions.paths_changed {
+                        step_paths_changed_tab_id = Some(tab.id);
+                    }
+                }
+            }
         });
 
         if file_path_changed {
@@ -1055,6 +1173,22 @@ impl eframe::App for PropertiesGui {
                 tab.assembly_status = None;
                 tab.assembly_status_is_error = false;
             }
+        }
+        if let Some(tab_id) = step_paths_changed_tab_id {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.assembly_status = None;
+                tab.assembly_status_is_error = false;
+            }
+        }
+        if let Some(tab_id) = step_clear_tab_id {
+            if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                tab.step_file_paths.clear();
+                tab.assembly_status = None;
+                tab.assembly_status_is_error = false;
+            }
+        }
+        if let Some(tab_id) = step_browse_tab_id {
+            self.select_step_files(tab_id);
         }
         if let Some(tab_id) = print_browse_tab_id {
             self.select_print_files(tab_id);
@@ -1136,6 +1270,8 @@ impl eframe::App for PropertiesGui {
             self.print_plans(tab_id, context);
         } else if let Some(tab_id) = print_pdf_tab_id {
             self.export_print_plan_pdfs(tab_id, context);
+        } else if let Some(tab_id) = step_export_tab_id {
+            self.export_step_files(tab_id, context);
         }
     }
 }

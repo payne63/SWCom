@@ -13,7 +13,7 @@ use super::dispatch::{
     bool_from_variant, byref_bool, byref_bstr, byref_f64, byref_i32, dispatch_array_from_variant,
     dispatch_from_variant, f64_from_variant, i32_from_variant, i64_from_variant, invoke,
     invoke_string, optional_dispatch_from_variant, set_property, string_array_from_variant,
-    variant_bool, variant_bstr, variant_dispatch, variant_i32,
+    variant_bool, variant_bstr, variant_dispatch, variant_i32, variant_null_dispatch,
 };
 
 /// Un composant référencé par un assemblage et son nombre total d'occurrences.
@@ -372,6 +372,123 @@ fn export_drawing_pdf_document(
         return Err(Error::new(
             HRESULT(0x80004005_u32 as i32),
             format!("Échec de l'enregistrement PDF (erreur SolidWorks {errors}).").into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Exporte des pièces et assemblages en STEP AP214 à côté de leur fichier source.
+pub(super) fn export_step_files(
+    sw_app: &IDispatch,
+    file_paths: &[String],
+) -> Result<(usize, Vec<String>)> {
+    const STEP_AP_PREFERENCE: i32 = 75;
+
+    let mut preference_arguments = [variant_i32(STEP_AP_PREFERENCE)];
+    let original_preference = invoke(
+        sw_app,
+        "GetUserPreferenceIntegerValue",
+        DISPATCH_METHOD,
+        &mut preference_arguments,
+        true,
+    )?;
+    let original_preference = i32_from_variant(&original_preference)?;
+
+    let mut set_preference_arguments = [variant_i32(214), variant_i32(STEP_AP_PREFERENCE)];
+    let preference_set = invoke(
+        sw_app,
+        "SetUserPreferenceIntegerValue",
+        DISPATCH_METHOD,
+        &mut set_preference_arguments,
+        true,
+    )
+    .and_then(|result| {
+        if bool_from_variant(&result)? {
+            Ok(())
+        } else {
+            Err(Error::new(
+                HRESULT(0x80004005_u32 as i32),
+                "SolidWorks n'a pas accepté le format STEP AP214.".into(),
+            ))
+        }
+    });
+    if let Err(error) = preference_set {
+        let _ = set_step_ap_preference(sw_app, original_preference);
+        return Err(error);
+    }
+
+    let mut exported_count = 0;
+    let mut failures = Vec::new();
+    for file_path in file_paths {
+        let output_path = Path::new(file_path).with_extension("step");
+        match export_step_file(sw_app, file_path, &output_path) {
+            Ok(()) => exported_count += 1,
+            Err(error) => failures.push(format!("{} : {error:?}", Path::new(file_path).display())),
+        }
+    }
+
+    set_step_ap_preference(sw_app, original_preference)?;
+    Ok((exported_count, failures))
+}
+
+fn set_step_ap_preference(sw_app: &IDispatch, value: i32) -> Result<()> {
+    let mut arguments = [variant_i32(value), variant_i32(75)];
+    let result = invoke(
+        sw_app,
+        "SetUserPreferenceIntegerValue",
+        DISPATCH_METHOD,
+        &mut arguments,
+        true,
+    )?;
+    if !bool_from_variant(&result)? {
+        return Err(Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            "Impossible de restaurer la préférence STEP de SolidWorks.".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn export_step_file(sw_app: &IDispatch, file_path: &str, output_path: &Path) -> Result<()> {
+    let model_type = document_type(file_path)?;
+    if model_type != 1 && model_type != 2 {
+        return Err(Error::new(
+            HRESULT(0x80070057_u32 as i32),
+            "L'export STEP nécessite un fichier .sldprt ou .sldasm".into(),
+        ));
+    }
+
+    let (document, opened_by_this_call) = open_or_reuse_document(sw_app, file_path, model_type, 1)?;
+    let export_result = save_model_as_step(&document, output_path);
+    if !opened_by_this_call {
+        return export_result;
+    }
+
+    let close_result = close_document(sw_app, &document, file_path);
+    export_result.and_then(|()| close_result)
+}
+
+fn save_model_as_step(document: &IDispatch, output_path: &Path) -> Result<()> {
+    let extension = invoke(document, "Extension", DISPATCH_PROPERTYGET, &mut [], true)?;
+    let extension = dispatch_from_variant(&extension)?;
+    let mut errors = 0_i32;
+    let mut warnings = 0_i32;
+    let output_path = output_path.to_string_lossy();
+    let mut arguments = [
+        byref_i32(&mut warnings),
+        byref_i32(&mut errors),
+        variant_null_dispatch(), // AdvancedSaveAsOptions
+        variant_null_dispatch(), // ExportData
+        variant_i32(1),          // swSaveAsOptions_Silent
+        variant_i32(0),          // swSaveAsCurrentVersion
+        variant_bstr(&output_path),
+    ];
+    let saved = invoke(&extension, "SaveAs3", DISPATCH_METHOD, &mut arguments, true)?;
+    if !bool_from_variant(&saved)? || errors != 0 {
+        return Err(Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            format!("Échec SolidWorks lors de l'export STEP (erreurs {errors}, avertissements {warnings}).")
+                .into(),
         ));
     }
     Ok(())

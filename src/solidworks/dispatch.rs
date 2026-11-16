@@ -261,6 +261,16 @@ pub(super) fn bool_from_variant(variant: &VARIANT) -> Result<bool> {
     }
 }
 
+pub(super) fn variant_null_dispatch() -> VARIANT {
+    let mut variant = VARIANT::default();
+    unsafe {
+        let raw = &mut variant.Anonymous.Anonymous;
+        raw.vt = VT_DISPATCH;
+        raw.Anonymous.pdispVal = ManuallyDrop::new(None);
+    }
+    variant
+}
+
 pub(super) fn variant_dispatch(value: &IDispatch) -> VARIANT {
     let mut variant = VARIANT::default();
     unsafe {

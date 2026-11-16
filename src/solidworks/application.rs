@@ -97,6 +97,11 @@ impl SolidWorksApp {
         super::properties::update_file_properties(&self.dispatch, file_path, properties)
     }
 
+    /// Exporte des pièces et des assemblages en STEP AP214 à côté des fichiers source.
+    pub fn export_step_files(&self, file_paths: &[String]) -> Result<(usize, Vec<String>)> {
+        super::properties::export_step_files(&self.dispatch, file_paths)
+    }
+
     /// Exporte une liste de dessins en PDF dans le répertoire de chaque fichier source.
     pub fn export_drawing_pdfs(&self, drawing_paths: &[String]) -> Result<(usize, Vec<String>)> {
         super::properties::export_drawing_pdfs(&self.dispatch, drawing_paths)
