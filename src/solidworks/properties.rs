@@ -316,29 +316,34 @@ pub(super) fn print_drawing(sw_app: &IDispatch, file_path: &str, printer_name: &
     }
 
     let (document, _) = open_or_reuse_document(sw_app, file_path, 3, 1)?;
-    let extension = invoke(&document, "Extension", DISPATCH_PROPERTYGET, &mut [], true)?;
-    let extension = dispatch_from_variant(&extension)?;
-    let print_specification = invoke(
-        &extension,
-        "GetPrintSpecification",
-        DISPATCH_METHOD,
-        &mut [],
-        true,
-    )?;
-    let print_specification = dispatch_from_variant(&print_specification)?;
-    let mut arguments = [
-        variant_dispatch(&print_specification),
-        variant_bstr(""),
-        variant_bstr(printer_name),
-    ];
-    invoke(
-        &extension,
-        "PrintOut4",
-        DISPATCH_METHOD,
-        &mut arguments,
-        false,
-    )?;
-    Ok(())
+    let print_result: Result<()> = (|| {
+        let extension = invoke(&document, "Extension", DISPATCH_PROPERTYGET, &mut [], true)?;
+        let extension = dispatch_from_variant(&extension)?;
+        let print_specification = invoke(
+            &extension,
+            "GetPrintSpecification",
+            DISPATCH_METHOD,
+            &mut [],
+            true,
+        )?;
+        let print_specification = dispatch_from_variant(&print_specification)?;
+        let mut arguments = [
+            variant_dispatch(&print_specification),
+            variant_bstr(""),
+            variant_bstr(printer_name),
+        ];
+        invoke(
+            &extension,
+            "PrintOut4",
+            DISPATCH_METHOD,
+            &mut arguments,
+            false,
+        )?;
+        Ok(())
+    })();
+    let close_result = close_document(sw_app, &document, file_path);
+    print_result?;
+    close_result
 }
 
 pub(super) fn open_file_and_activate(sw_app: &IDispatch, file_path: &str) -> Result<()> {
