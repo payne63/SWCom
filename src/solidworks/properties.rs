@@ -12,8 +12,8 @@ use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, S
 use super::dispatch::{
     bool_from_variant, byref_bool, byref_bstr, byref_f64, byref_i32, dispatch_array_from_variant,
     dispatch_from_variant, f64_from_variant, i32_from_variant, i64_from_variant, invoke,
-    invoke_string, optional_dispatch_from_variant, string_array_from_variant, variant_bool,
-    variant_bstr, variant_dispatch, variant_i32,
+    invoke_string, optional_dispatch_from_variant, set_property, string_array_from_variant,
+    variant_bool, variant_bstr, variant_dispatch, variant_i32,
 };
 
 /// Un composant référencé par un assemblage et son nombre total d'occurrences.
@@ -269,6 +269,114 @@ pub(super) fn get_file_properties(
 /// # Errors
 /// Renvoie une erreur si le chemin est invalide ou si l'ouverture, l'activation ou la mise
 /// au premier plan échoue.
+/// Exporte chaque plan au format PDF à côté du fichier source.
+pub(super) fn export_drawing_pdfs(
+    sw_app: &IDispatch,
+    drawing_paths: &[String],
+) -> Result<(usize, Vec<String>)> {
+    let mut exported_count = 0;
+    let mut failures = Vec::new();
+
+    for drawing_path in drawing_paths {
+        let output_path = Path::new(drawing_path).with_extension("pdf");
+        match export_drawing_pdf(sw_app, drawing_path, &output_path) {
+            Ok(()) => exported_count += 1,
+            Err(error) => {
+                failures.push(format!("{} : {error:?}", Path::new(drawing_path).display()))
+            }
+        }
+    }
+
+    Ok((exported_count, failures))
+}
+
+fn export_drawing_pdf(sw_app: &IDispatch, drawing_path: &str, output_path: &Path) -> Result<()> {
+    if document_type(drawing_path)? != 3 {
+        return Err(Error::new(
+            HRESULT(0x80070057_u32 as i32),
+            "L'export PDF nécessite un fichier .slddrw".into(),
+        ));
+    }
+
+    let (document, opened_by_this_call) = open_or_reuse_document(sw_app, drawing_path, 3, 1)?;
+    let export_result = export_drawing_pdf_document(sw_app, &document, output_path);
+    if !opened_by_this_call {
+        return export_result;
+    }
+
+    let close_result = close_document(sw_app, &document, drawing_path);
+    export_result.and_then(|()| close_result)
+}
+
+fn export_drawing_pdf_document(
+    sw_app: &IDispatch,
+    document: &IDispatch,
+    output_path: &Path,
+) -> Result<()> {
+    let extension = invoke(document, "Extension", DISPATCH_PROPERTYGET, &mut [], true)?;
+    let extension = dispatch_from_variant(&extension)?;
+    let mut export_data_arguments = [variant_i32(1)]; // swExportPdfData
+    let export_data = invoke(
+        sw_app,
+        "GetExportFileData",
+        DISPATCH_METHOD,
+        &mut export_data_arguments,
+        true,
+    )?;
+    let export_data = dispatch_from_variant(&export_data)?;
+
+    let mut export_as_3d = variant_bool(false);
+    set_property(&export_data, "ExportAs3D", &mut export_as_3d)?;
+    let mut view_pdf_after_saving = variant_bool(false);
+    set_property(
+        &export_data,
+        "ViewPdfAfterSaving",
+        &mut view_pdf_after_saving,
+    )?;
+
+    let sheet_names = invoke(document, "GetSheetNames", DISPATCH_METHOD, &mut [], true)?;
+    let mut set_sheets_arguments = [sheet_names, variant_i32(3)]; // ExportSpecifiedSheets
+    let set_sheets_result = invoke(
+        &export_data,
+        "SetSheets",
+        DISPATCH_METHOD,
+        &mut set_sheets_arguments,
+        true,
+    )?;
+    if !bool_from_variant(&set_sheets_result)? {
+        return Err(Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            "SolidWorks n'a pas accepté l'export de toutes les feuilles.".into(),
+        ));
+    }
+
+    let mut errors = 0_i32;
+    let mut warnings = 0_i32;
+    let output_path = output_path.to_string_lossy();
+    let mut save_arguments = [
+        byref_i32(&mut warnings),
+        byref_i32(&mut errors),
+        variant_dispatch(&export_data),
+        variant_i32(1), // swSaveAsOptions_Silent
+        variant_i32(0), // swSaveAsCurrentVersion
+        variant_bstr(&output_path),
+    ];
+    let saved = invoke(
+        &extension,
+        "SaveAs",
+        DISPATCH_METHOD,
+        &mut save_arguments,
+        true,
+    )?;
+    if !bool_from_variant(&saved)? || errors != 0 {
+        return Err(Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            format!("Échec de l'enregistrement PDF (erreur SolidWorks {errors}).").into(),
+        ));
+    }
+    Ok(())
+}
+
 pub(super) fn drawing_paper_size(sw_app: &IDispatch, file_path: &str) -> Result<String> {
     if document_type(file_path)? != 3 {
         return Err(Error::new(

@@ -64,6 +64,11 @@ enum WorkerOutcome {
     },
     /// Plans chargés avec leur format papier.
     PrintPlansLoaded(Vec<(String, String)>),
+    /// Résultats de l'export PDF des plans sélectionnés.
+    PdfExported {
+        exported_count: usize,
+        failures: Vec<String>,
+    },
     /// Nombre de plans envoyés successivement à l'imprimante.
     PlansPrinted(usize),
 }
@@ -341,6 +346,32 @@ impl PropertiesGui {
         }
     }
 
+    /// Exporte les dessins sélectionnés en PDF dans leurs répertoires d'origine.
+    fn export_print_plan_pdfs(&mut self, tab_id: u64, context: &egui::Context) {
+        let Some(paths) = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)
+            .map(|tab| tab.print_plan_paths.clone())
+        else {
+            return;
+        };
+        if paths.is_empty() {
+            return;
+        }
+
+        self.start_worker(tab_id, context, move || {
+            let (exported_count, failures) =
+                run_solidworks_operation_without_shutdown(|solidworks| {
+                    solidworks.export_drawing_pdfs(&paths)
+                })?;
+            Ok(WorkerOutcome::PdfExported {
+                exported_count,
+                failures,
+            })
+        });
+    }
+
     /// Ouvre un sélecteur de plusieurs dessins SolidWorks à ajouter à la liste.
     fn select_print_files(&mut self, tab_id: u64) {
         let paths = FileDialog::new()
@@ -556,6 +587,26 @@ impl PropertiesGui {
                         tab.assembly_status_is_error = false;
                     }
                 }
+                Ok(WorkerOutcome::PdfExported {
+                    exported_count,
+                    failures,
+                }) => {
+                    if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
+                        if failures.is_empty() {
+                            tab.assembly_status = Some(format!(
+                                "{exported_count} PDF exporté(s) dans le répertoire d'origine des plans."
+                            ));
+                            tab.assembly_status_is_error = false;
+                        } else {
+                            let first_failure = &failures[0];
+                            tab.assembly_status = Some(format!(
+                                "{exported_count} PDF créé(s), {} échec(s). Premier échec : {first_failure}",
+                                failures.len()
+                            ));
+                            tab.assembly_status_is_error = true;
+                        }
+                    }
+                }
                 Ok(WorkerOutcome::PlansPrinted(count)) => {
                     if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id == tab_id) {
                         tab.assembly_status = Some(format!(
@@ -752,6 +803,7 @@ impl eframe::App for PropertiesGui {
         let mut print_clear_tab_id = None;
         let mut print_show_tab_id = None;
         let mut print_tab_id = None;
+        let mut print_pdf_tab_id = None;
         let mut print_paths_changed_tab_id = None;
 
         TopBottomPanel::top("app_toolbar").show(context, |ui| {
@@ -957,6 +1009,9 @@ impl eframe::App for PropertiesGui {
                     if actions.print_clicked {
                         print_tab_id = Some(tab.id);
                     }
+                    if actions.export_pdf_clicked {
+                        print_pdf_tab_id = Some(tab.id);
+                    }
                     if actions.paths_changed {
                         print_paths_changed_tab_id = Some(tab.id);
                     }
@@ -1079,6 +1134,8 @@ impl eframe::App for PropertiesGui {
             self.process_assembly_tab(tab_id, context);
         } else if let Some(tab_id) = print_tab_id {
             self.print_plans(tab_id, context);
+        } else if let Some(tab_id) = print_pdf_tab_id {
+            self.export_print_plan_pdfs(tab_id, context);
         }
     }
 }

@@ -1,7 +1,9 @@
 use std::{mem::ManuallyDrop, ptr};
 use windows::core::{Result, BSTR, GUID, PCWSTR};
 use windows::Win32::Foundation::VARIANT_BOOL;
-use windows::Win32::System::Com::{IDispatch, DISPATCH_FLAGS, DISPPARAMS, SAFEARRAY};
+use windows::Win32::System::Com::{
+    IDispatch, DISPATCH_FLAGS, DISPATCH_PROPERTYPUT, DISPPARAMS, SAFEARRAY,
+};
 use windows::Win32::System::Ole::{SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound};
 use windows::Win32::System::Variant::{
     VARENUM, VARIANT, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_I4, VT_I8, VT_R8,
@@ -15,6 +17,35 @@ use windows::Win32::System::Variant::{
 ///
 /// # Errors
 /// Renvoie une erreur si le membre ne peut pas être résolu ou si son invocation échoue.
+pub(super) fn set_property(object: &IDispatch, name: &str, value: &mut VARIANT) -> Result<()> {
+    let wide_name: Vec<u16> = name.encode_utf16().chain(Some(0)).collect();
+    let name_pointer = PCWSTR(wide_name.as_ptr());
+    let mut dispid = 0;
+
+    unsafe {
+        object.GetIDsOfNames(&GUID::zeroed(), &name_pointer, 1, 0x0400, &mut dispid)?;
+
+        let mut named_argument = -3_i32;
+        let mut parameters = DISPPARAMS {
+            rgvarg: value,
+            rgdispidNamedArgs: &mut named_argument,
+            cArgs: 1,
+            cNamedArgs: 1,
+        };
+        object.Invoke(
+            dispid,
+            &GUID::zeroed(),
+            0x0400,
+            DISPATCH_PROPERTYPUT,
+            &mut parameters,
+            None,
+            None,
+            None,
+        )?;
+    }
+    Ok(())
+}
+
 pub(super) fn invoke(
     object: &IDispatch,
     name: &str,

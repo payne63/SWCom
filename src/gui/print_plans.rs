@@ -10,6 +10,7 @@ pub(super) struct Actions {
     pub(super) clear_clicked: bool,
     pub(super) show_plans_clicked: bool,
     pub(super) print_clicked: bool,
+    pub(super) export_pdf_clicked: bool,
     pub(super) paths_changed: bool,
 }
 
@@ -81,6 +82,12 @@ pub(super) fn show(
                         egui::Button::new("Recherche du format").min_size(button_size),
                     )
                     .clicked();
+                actions.export_pdf_clicked = ui
+                    .add_enabled(
+                        !is_processing && !tab.print_plan_paths.is_empty(),
+                        egui::Button::new("Export PDF").min_size(button_size),
+                    )
+                    .clicked();
                 actions.print_clicked = ui
                     .add_enabled(
                         !is_processing
@@ -109,7 +116,7 @@ pub(super) fn show(
                     .any(|(_, format)| format.is_empty())
                 {
                     ui.add_space(4.0);
-                    ui.label("Cliquez sur « Afficher les plans » pour charger les formats.");
+                    ui.label("Cliquez sur « Recherche du format » pour charger les formats.");
                 }
             },
         );

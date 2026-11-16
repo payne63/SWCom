@@ -97,6 +97,11 @@ impl SolidWorksApp {
         super::properties::update_file_properties(&self.dispatch, file_path, properties)
     }
 
+    /// Exporte une liste de dessins en PDF dans le répertoire de chaque fichier source.
+    pub fn export_drawing_pdfs(&self, drawing_paths: &[String]) -> Result<(usize, Vec<String>)> {
+        super::properties::export_drawing_pdfs(&self.dispatch, drawing_paths)
+    }
+
     /// Retourne le format papier A (A4 à A0) de la feuille active d'un dessin.
     pub fn drawing_paper_size(&self, file_path: &str) -> Result<String> {
         super::properties::drawing_paper_size(&self.dispatch, file_path)
