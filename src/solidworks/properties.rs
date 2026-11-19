@@ -3,8 +3,9 @@ use std::{
     fs,
     path::{Path, PathBuf},
 };
-use windows::core::{Error, Result, BSTR, HRESULT};
+use windows::core::{Error, Result, BSTR, HRESULT, PCWSTR, PWSTR};
 use windows::Win32::Foundation::{HWND, VARIANT_BOOL};
+use windows::Win32::Storage::Xps::{DeviceCapabilitiesW, DC_PAPERNAMES, DC_PAPERS};
 use windows::Win32::System::Com::{IDispatch, DISPATCH_METHOD, DISPATCH_PROPERTYGET};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::WindowsAndMessaging::{SetForegroundWindow, ShowWindow, SW_RESTORE};
@@ -494,6 +495,26 @@ fn save_model_as_step(document: &IDispatch, output_path: &Path) -> Result<()> {
     Ok(())
 }
 
+fn active_drawing_sheet_info(document: &IDispatch) -> Result<(String, i32)> {
+    let sheet = invoke(document, "GetCurrentSheet", DISPATCH_METHOD, &mut [], true)?;
+    let sheet = dispatch_from_variant(&sheet)?;
+    let mut width = 0.0;
+    let mut height = 0.0;
+    let mut arguments = [byref_f64(&mut height), byref_f64(&mut width)];
+    let paper_size = invoke(&sheet, "GetSize", DISPATCH_METHOD, &mut arguments, true)?;
+    let paper_size = i32_from_variant(&paper_size)?;
+    let format = match paper_size {
+        6 | 7 => "A4",
+        8 => "A3",
+        9 => "A2",
+        10 => "A1",
+        11 => "A0",
+        _ => "Autre",
+    };
+    let orientation = if width > height { 2 } else { 1 };
+    Ok((format.to_owned(), orientation))
+}
+
 pub(super) fn drawing_paper_size(sw_app: &IDispatch, file_path: &str) -> Result<String> {
     if document_type(file_path)? != 3 {
         return Err(Error::new(
@@ -503,36 +524,189 @@ pub(super) fn drawing_paper_size(sw_app: &IDispatch, file_path: &str) -> Result<
     }
 
     let (document, opened_by_this_call) = open_or_reuse_document(sw_app, file_path, 3, 1)?;
-    let paper_size = (|| {
-        let sheet = invoke(&document, "GetCurrentSheet", DISPATCH_METHOD, &mut [], true)?;
-        let sheet = dispatch_from_variant(&sheet)?;
-        let mut width = 0.0;
-        let mut height = 0.0;
-        let mut arguments = [byref_f64(&mut height), byref_f64(&mut width)];
-        let paper_size = invoke(&sheet, "GetSize", DISPATCH_METHOD, &mut arguments, true)?;
-        i32_from_variant(&paper_size)
-    })();
-
+    let sheet_info = active_drawing_sheet_info(&document);
     let close_result = if opened_by_this_call {
         close_document(sw_app, &document, file_path)
     } else {
         Ok(())
     };
-    let paper_size = paper_size?;
+    let (format, _) = sheet_info?;
     close_result?;
-
-    Ok(match paper_size {
-        6 | 7 => "A4",
-        8 => "A3",
-        9 => "A2",
-        10 => "A1",
-        11 => "A0",
-        _ => "Autre",
-    }
-    .to_owned())
+    Ok(format)
 }
 
-pub(super) fn print_drawing(sw_app: &IDispatch, file_path: &str, printer_name: &str) -> Result<()> {
+fn printer_paper_code(printer_name: &str, paper_format: &str) -> Result<i32> {
+    let printer_wide: Vec<u16> = printer_name.encode_utf16().chain(Some(0)).collect();
+    let printer = PCWSTR(printer_wide.as_ptr());
+    let empty_port = [0_u16];
+    let port = PCWSTR(empty_port.as_ptr());
+    let paper_count = unsafe { DeviceCapabilitiesW(printer, port, DC_PAPERS, PWSTR::null(), None) };
+    if paper_count <= 0 {
+        return Err(Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            format!("Impossible de récupérer les formats papier du pilote '{printer_name}'.")
+                .into(),
+        ));
+    }
+
+    let mut paper_codes = vec![0_u16; paper_count as usize];
+    let returned_codes = unsafe {
+        DeviceCapabilitiesW(
+            printer,
+            port,
+            DC_PAPERS,
+            PWSTR(paper_codes.as_mut_ptr()),
+            None,
+        )
+    };
+    if returned_codes <= 0 {
+        return Err(Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            format!("Impossible de lire les codes papier du pilote '{printer_name}'.").into(),
+        ));
+    }
+
+    let name_count =
+        unsafe { DeviceCapabilitiesW(printer, port, DC_PAPERNAMES, PWSTR::null(), None) };
+    if name_count <= 0 {
+        return Err(Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            format!("Le pilote '{printer_name}' ne fournit pas les noms de ses formats papier.")
+                .into(),
+        ));
+    }
+
+    const PAPER_NAME_LENGTH: usize = 64;
+    let mut paper_names = vec![0_u16; name_count as usize * PAPER_NAME_LENGTH];
+    let returned_names = unsafe {
+        DeviceCapabilitiesW(
+            printer,
+            port,
+            DC_PAPERNAMES,
+            PWSTR(paper_names.as_mut_ptr()),
+            None,
+        )
+    };
+    if returned_names <= 0 {
+        return Err(Error::new(
+            HRESULT(0x80004005_u32 as i32),
+            format!("Impossible de lire les noms papier du pilote '{printer_name}'.").into(),
+        ));
+    }
+
+    let entry_count = (returned_codes as usize)
+        .min(returned_names as usize)
+        .min(paper_count as usize)
+        .min(name_count as usize);
+    let mut compatible_code = None;
+    for index in 0..entry_count {
+        let start = index * PAPER_NAME_LENGTH;
+        let name_slice = &paper_names[start..start + PAPER_NAME_LENGTH];
+        let name_length = name_slice
+            .iter()
+            .position(|character| *character == 0)
+            .unwrap_or(PAPER_NAME_LENGTH);
+        let name = String::from_utf16_lossy(&name_slice[..name_length]);
+        if name.trim().eq_ignore_ascii_case(paper_format) {
+            return Ok(paper_codes[index] as i32);
+        }
+        if compatible_code.is_none() && paper_name_matches_format(&name, paper_format) {
+            compatible_code = Some(paper_codes[index] as i32);
+        }
+    }
+
+    compatible_code.ok_or_else(|| {
+        Error::new(
+            HRESULT(0x80070057_u32 as i32),
+            format!(
+                "Le pilote de l'imprimante '{printer_name}' ne propose pas de format {paper_format}."
+            )
+            .into(),
+        )
+    })
+}
+
+fn paper_name_matches_format(paper_name: &str, paper_format: &str) -> bool {
+    let paper_name = paper_name.trim();
+    let paper_name = ["ISO ", "ISO-"]
+        .iter()
+        .find_map(|prefix| {
+            paper_name
+                .get(..prefix.len())
+                .filter(|candidate| candidate.eq_ignore_ascii_case(prefix))
+                .map(|_| &paper_name[prefix.len()..])
+        })
+        .unwrap_or(paper_name);
+    if paper_name.eq_ignore_ascii_case(paper_format) {
+        return true;
+    }
+
+    let Some(suffix) = paper_name
+        .get(paper_format.len()..)
+        .filter(|_| paper_name[..paper_format.len()].eq_ignore_ascii_case(paper_format))
+    else {
+        return false;
+    };
+    suffix
+        .chars()
+        .next()
+        .is_some_and(|character| !character.is_ascii_alphanumeric())
+        || suffix.eq_ignore_ascii_case("R")
+        || suffix.eq_ignore_ascii_case("ROTATED")
+}
+
+fn set_i32_property(object: &IDispatch, name: &str, value: i32) -> Result<()> {
+    let mut value = variant_i32(value);
+    set_property(object, name, &mut value)
+}
+
+struct OriginalDrawingPrintSettings {
+    printer_name: String,
+    paper_size: i32,
+    orientation: i32,
+    page_setup_mode: i32,
+}
+
+fn restore_drawing_print_settings(
+    document: &IDispatch,
+    extension: &IDispatch,
+    page_setup: &IDispatch,
+    settings: &OriginalDrawingPrintSettings,
+) -> Result<()> {
+    let mut first_error = None;
+    let mut printer = variant_bstr(&settings.printer_name);
+    if let Err(error) = set_property(document, "Printer", &mut printer) {
+        first_error = Some(error);
+    }
+    if let Err(error) = set_i32_property(page_setup, "PrinterPaperSize", settings.paper_size) {
+        first_error.get_or_insert(error);
+    }
+    if let Err(error) = set_i32_property(page_setup, "Orientation", settings.orientation) {
+        first_error.get_or_insert(error);
+    }
+    if let Err(error) = set_i32_property(extension, "UsePageSetup", settings.page_setup_mode) {
+        first_error.get_or_insert(error);
+    }
+    first_error.map_or(Ok(()), Err)
+}
+
+fn combine_with_cleanup(primary: Result<()>, cleanup: Result<()>, context: &str) -> Result<()> {
+    match (primary, cleanup) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(error), Err(cleanup_error)) => Err(Error::new(
+            error.code(),
+            format!("{error:?}; {context}: {cleanup_error:?}").into(),
+        )),
+    }
+}
+
+pub(super) fn print_drawing(
+    sw_app: &IDispatch,
+    file_path: &str,
+    expected_format: &str,
+    printer_name: &str,
+) -> Result<()> {
     if document_type(file_path)? != 3 {
         return Err(Error::new(
             HRESULT(0x80070057_u32 as i32),
@@ -540,35 +714,126 @@ pub(super) fn print_drawing(sw_app: &IDispatch, file_path: &str, printer_name: &
         ));
     }
 
-    let (document, _) = open_or_reuse_document(sw_app, file_path, 3, 1)?;
+    let (document, opened_by_this_call) = open_or_reuse_document(sw_app, file_path, 3, 1)?;
     let print_result: Result<()> = (|| {
+        let (paper_format, orientation) = active_drawing_sheet_info(&document)?;
+        if !paper_format.eq_ignore_ascii_case(expected_format) {
+            return Err(Error::new(
+                HRESULT(0x80070057_u32 as i32),
+                format!(
+                    "Le format de '{file_path}' a changé ({paper_format}, attendu {expected_format}). Relancez la recherche du format."
+                )
+                .into(),
+            ));
+        }
+        if paper_format == "Autre" {
+            return Err(Error::new(
+                HRESULT(0x80070057_u32 as i32),
+                format!("Le format papier de '{file_path}' n'est pas pris en charge.").into(),
+            ));
+        }
+        let paper_code = printer_paper_code(printer_name, &paper_format)?;
         let extension = invoke(&document, "Extension", DISPATCH_PROPERTYGET, &mut [], true)?;
         let extension = dispatch_from_variant(&extension)?;
-        let print_specification = invoke(
+        let page_setup = invoke(&document, "PageSetup", DISPATCH_PROPERTYGET, &mut [], true)?;
+        let page_setup = dispatch_from_variant(&page_setup)?;
+        let page_setup_mode = i32_from_variant(&invoke(
             &extension,
-            "GetPrintSpecification",
-            DISPATCH_METHOD,
+            "UsePageSetup",
+            DISPATCH_PROPERTYGET,
             &mut [],
             true,
-        )?;
-        let print_specification = dispatch_from_variant(&print_specification)?;
-        let mut arguments = [
-            variant_dispatch(&print_specification),
-            variant_bstr(""),
-            variant_bstr(printer_name),
-        ];
-        invoke(
-            &extension,
-            "PrintOut4",
-            DISPATCH_METHOD,
-            &mut arguments,
-            false,
-        )?;
-        Ok(())
+        )?)?;
+        let printer_name_before =
+            invoke_string(&document, "Printer", DISPATCH_PROPERTYGET, &mut [])?;
+
+        if let Err(error) = set_i32_property(&extension, "UsePageSetup", 1) {
+            let restore_result = set_i32_property(&extension, "UsePageSetup", page_setup_mode);
+            return combine_with_cleanup(
+                Err(error),
+                restore_result,
+                "restauration du mode de page",
+            );
+        }
+        let previous_page_settings = (|| {
+            let paper_size = i32_from_variant(&invoke(
+                &page_setup,
+                "PrinterPaperSize",
+                DISPATCH_PROPERTYGET,
+                &mut [],
+                true,
+            )?)?;
+            let previous_orientation = i32_from_variant(&invoke(
+                &page_setup,
+                "Orientation",
+                DISPATCH_PROPERTYGET,
+                &mut [],
+                true,
+            )?)?;
+            Ok((paper_size, previous_orientation))
+        })();
+        let (previous_paper_size, previous_orientation) = match previous_page_settings {
+            Ok(settings) => settings,
+            Err(error) => {
+                let restore_result = set_i32_property(&extension, "UsePageSetup", page_setup_mode);
+                return combine_with_cleanup(
+                    Err(error),
+                    restore_result,
+                    "restauration du mode de page",
+                );
+            }
+        };
+        let original_settings = OriginalDrawingPrintSettings {
+            printer_name: printer_name_before,
+            paper_size: previous_paper_size,
+            orientation: previous_orientation,
+            page_setup_mode,
+        };
+
+        let print_operation = (|| {
+            let mut printer = variant_bstr(printer_name);
+            set_property(&document, "Printer", &mut printer)?;
+            set_i32_property(&page_setup, "PrinterPaperSize", paper_code)?;
+            set_i32_property(&page_setup, "Orientation", orientation)?;
+
+            let print_specification = invoke(
+                &extension,
+                "GetPrintSpecification",
+                DISPATCH_METHOD,
+                &mut [],
+                true,
+            )?;
+            let print_specification = dispatch_from_variant(&print_specification)?;
+            let mut queue = variant_bstr(printer_name);
+            set_property(&print_specification, "PrinterQueue", &mut queue)?;
+            let mut arguments = [
+                variant_dispatch(&print_specification),
+                variant_bstr(""),
+                variant_bstr(printer_name),
+            ];
+            invoke(
+                &extension,
+                "PrintOut4",
+                DISPATCH_METHOD,
+                &mut arguments,
+                false,
+            )?;
+            Ok(())
+        })();
+        let restore_result =
+            restore_drawing_print_settings(&document, &extension, &page_setup, &original_settings);
+        combine_with_cleanup(
+            print_operation,
+            restore_result,
+            "restauration des réglages d'impression",
+        )
     })();
-    let close_result = close_document(sw_app, &document, file_path);
-    print_result?;
-    close_result
+    let close_result = if opened_by_this_call {
+        close_document(sw_app, &document, file_path)
+    } else {
+        Ok(())
+    };
+    combine_with_cleanup(print_result, close_result, "fermeture du document")
 }
 
 pub(super) fn open_file_and_activate(sw_app: &IDispatch, file_path: &str) -> Result<()> {
@@ -1143,7 +1408,17 @@ fn active_configuration_property_manager(document: &IDispatch) -> Result<IDispat
 mod tests {
     use std::collections::HashMap;
 
-    use super::{accumulate_tree_quantities, AssemblyItemKind, AssemblyTreeNode};
+    use super::{
+        accumulate_tree_quantities, paper_name_matches_format, AssemblyItemKind, AssemblyTreeNode,
+    };
+
+    #[test]
+    fn matches_printer_paper_names_to_a_format() {
+        assert!(paper_name_matches_format("A4", "A4"));
+        assert!(paper_name_matches_format("A4 (210 x 297 mm)", "A4"));
+        assert!(paper_name_matches_format("iso a4", "A4"));
+        assert!(!paper_name_matches_format("A40", "A4"));
+    }
 
     #[test]
     fn flattens_tree_quantities_through_repeated_subassemblies() {

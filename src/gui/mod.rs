@@ -539,12 +539,14 @@ impl PropertiesGui {
                             ));
                         }
                     };
-                    solidworks.print_drawing(path, printer).map_err(|error| {
-                        windows::core::Error::new(
-                            error.code(),
-                            format!("Échec de l'impression de '{path}' : {error:?}").into(),
-                        )
-                    })?;
+                    solidworks
+                        .print_drawing(path, format, printer)
+                        .map_err(|error| {
+                            windows::core::Error::new(
+                                error.code(),
+                                format!("Échec de l'impression de '{path}' : {error:?}").into(),
+                            )
+                        })?;
                 }
                 Ok(())
             })?;

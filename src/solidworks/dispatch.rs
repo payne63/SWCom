@@ -6,8 +6,8 @@ use windows::Win32::System::Com::{
 };
 use windows::Win32::System::Ole::{SafeArrayGetElement, SafeArrayGetLBound, SafeArrayGetUBound};
 use windows::Win32::System::Variant::{
-    VARENUM, VARIANT, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_I4, VT_I8, VT_R8,
-    VT_VARIANT,
+    VARENUM, VARIANT, VT_ARRAY, VT_BOOL, VT_BSTR, VT_BYREF, VT_DISPATCH, VT_I2, VT_I4, VT_I8,
+    VT_R8, VT_VARIANT,
 };
 
 /// Appelle un membre COM identifié par son nom via `IDispatch`.
@@ -212,10 +212,11 @@ pub(super) fn dispatch_from_variant(variant: &VARIANT) -> Result<IDispatch> {
 pub(super) fn i32_from_variant(variant: &VARIANT) -> Result<i32> {
     unsafe {
         let raw = &variant.Anonymous.Anonymous;
-        if raw.vt != VT_I4 {
-            return Err(windows::core::Error::from_win32());
+        match raw.vt {
+            VT_I2 => Ok(raw.Anonymous.iVal as i32),
+            VT_I4 => Ok(raw.Anonymous.lVal),
+            _ => Err(windows::core::Error::from_win32()),
         }
-        Ok(raw.Anonymous.lVal)
     }
 }
 
