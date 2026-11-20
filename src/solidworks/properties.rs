@@ -660,6 +660,8 @@ fn set_i32_property(object: &IDispatch, name: &str, value: i32) -> Result<()> {
     set_property(object, name, &mut value)
 }
 
+const SW_PAGE_SETUP_IN_USE_DOCUMENT: i32 = 2;
+
 struct OriginalDrawingPrintSettings {
     printer_name: String,
     paper_size: i32,
@@ -747,7 +749,9 @@ pub(super) fn print_drawing(
         let printer_name_before =
             invoke_string(&document, "Printer", DISPATCH_PROPERTYGET, &mut [])?;
 
-        if let Err(error) = set_i32_property(&extension, "UsePageSetup", 1) {
+        if let Err(error) =
+            set_i32_property(&extension, "UsePageSetup", SW_PAGE_SETUP_IN_USE_DOCUMENT)
+        {
             let restore_result = set_i32_property(&extension, "UsePageSetup", page_setup_mode);
             return combine_with_cleanup(
                 Err(error),
